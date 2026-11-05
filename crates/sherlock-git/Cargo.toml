@@ -1,0 +1,12 @@
+[package]
+name = "sherlock-git"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+sherlock-domain = { path = "../sherlock-domain" }
+sherlock-rewrite = { path = "../sherlock-rewrite" }
+
+[dev-dependencies]
+tempfile = "3"

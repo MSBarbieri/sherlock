@@ -1,0 +1,10 @@
+[package]
+name = "sherlock-scan"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+sherlock-domain = { path = "../sherlock-domain" }
+serde_json = "1"
+tempfile = "3"

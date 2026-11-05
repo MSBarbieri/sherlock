@@ -1,0 +1,12 @@
+[package]
+name = "sherlock-reviews"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+sherlock-domain = { path = "../sherlock-domain" }
+serde_json = "1"
+sha2 = "0.10"
+directories = "6"
+tempfile = "3"

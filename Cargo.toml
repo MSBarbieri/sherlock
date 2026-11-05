@@ -1,0 +1,18 @@
+[package]
+name = "sherlock"
+version = "0.1.0"
+edition = "2021"
+description = "Review repository secret findings and prepare redacted history"
+license = "MIT"
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[dependencies]
+sherlock-domain = { path = "crates/sherlock-domain" }
+sherlock-scan = { path = "crates/sherlock-scan" }
+sherlock-reviews = { path = "crates/sherlock-reviews" }
+sherlock-git = { path = "crates/sherlock-git" }
+eframe = "0.31"
+rfd = "0.15"
