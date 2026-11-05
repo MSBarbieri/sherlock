@@ -1,0 +1,16 @@
+[package]
+name = "sherlock"
+version = "0.1.0"
+edition = "2021"
+description = "Review repository secret findings and prepare redacted history"
+license = "MIT"
+
+[workspace]
+members = ["crates/sherlock-rewrite"]
+
+[dependencies]
+sherlock-rewrite = { path = "crates/sherlock-rewrite" }
+eframe = "0.31"
+rfd = "0.15"
+serde_json = "1"
+tempfile = "3"
