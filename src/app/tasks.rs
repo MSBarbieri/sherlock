@@ -21,7 +21,8 @@ pub(super) enum ResultMessage {
     ExactLocations(Result<Vec<sherlock_git::ExactLocation>, String>),
     ScannerCheck(Scanner, Result<(String, Vec<Finding>), String>),
     Completion(Result<Option<sherlock_reviews::links::CompletionRecord>, String>),
-    History(Result<String, String>),
+    History(Result<HistoryView, String>),
+    FilePreview(usize, Result<sherlock_git::FilePreview, String>),
     LinkGroups(Result<LinkData, String>),
     Scan(Result<Vec<Finding>, String>),
     Branches(Result<Vec<sherlock_git::RefSnapshot>, String>),
@@ -49,6 +50,7 @@ impl App {
                             self.branches.clear();
                             self.checked.clear();
                             self.history_output = None;
+                            self.file_preview = None;
                             self.prepared = None;
                             self.verification_output = None;
                             self.exact_locations.clear();
@@ -204,12 +206,16 @@ impl App {
                             self.status = format!("Could not load secret links: {e}");
                         }
                         ResultMessage::History(Ok(result)) => {
-                            self.history_output = Some(result);
+                            self.history_output = Some(Ok(result));
                             self.status = "Occurrence history ready.".into();
                         }
                         ResultMessage::History(Err(e)) => {
-                            self.history_output = Some(format!("History incomplete: {e}"));
+                            self.history_output = Some(Err(e));
                             self.status = "Could not load occurrence history.".into();
+                        }
+                        ResultMessage::FilePreview(index, result) => {
+                            self.file_preview = Some((index, result));
+                            self.status = "File inspection ready.".into();
                         }
                         ResultMessage::ScannerCheck(scanner, Ok((result, findings))) => {
                             self.scanner_findings = findings;

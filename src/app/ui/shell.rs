@@ -10,7 +10,10 @@ impl App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.add(egui::Image::new(self.logo(ctx, ui.visuals().dark_mode)).fit_to_exact_size(egui::vec2(28.0, 28.0)));
+                ui.add(
+                    egui::Image::new(self.logo(ctx, ui.visuals().dark_mode))
+                        .fit_to_exact_size(egui::vec2(28.0, 28.0)),
+                );
                 ui.heading(RichText::new("SHERLOCK").color(Color32::from_rgb(160, 143, 255)));
                 ui.label(RichText::new("  /  repository security").weak());
                 ui.separator();
@@ -94,6 +97,7 @@ impl App {
                         .clicked()
                     {
                         self.page = Page::Discovery;
+                        self.revealed = None;
                     }
                     ui.add_space(8.0);
                     super::icons::show(ui, super::icons::Icon::Finding);

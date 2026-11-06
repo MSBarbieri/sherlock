@@ -2,10 +2,14 @@
 mod history;
 mod locations;
 mod observation;
+mod preview;
 mod verification;
-pub use history::{secret_history, HistoryCommit, SecretHistory, UnplacedFinding};
+pub use history::{
+    history_graph, secret_history, GraphLine, HistoryCommit, SecretHistory, UnplacedFinding,
+};
 pub use locations::{exact_history_locations, ExactLocation};
 pub use observation::{repository_snapshot, RefState, RepositorySnapshot, WorktreeState};
+pub use preview::{preview_file, FilePreview};
 pub use verification::{verify_exact_values, VerifiedRef};
 
 use sherlock_domain::Finding;
@@ -152,6 +156,9 @@ pub fn rewrite_related_at(
     findings: &[Finding],
     snapshot: &[RefSnapshot],
 ) -> Result<String, String> {
+    if run("git", &["rev-parse", "--is-shallow-repository"], Some(repo))?.trim() == "true" {
+        return Err("This repository has incomplete shallow history; obtain complete history before preparing a rewrite.".into());
+    }
     let refs: Vec<String> = snapshot.iter().map(|entry| entry.name.clone()).collect();
     let current = snapshot_refs(repo, &refs)?;
     if current.iter().zip(snapshot).any(|(a, b)| a.tip != b.tip) {

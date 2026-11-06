@@ -32,6 +32,67 @@ pub struct SecretHistory {
     /// of the supplied snapshots contains that occurrence.
     pub commits: Vec<HistoryCommit>,
     pub unplaced: Vec<UnplacedFinding>,
+    pub shallow: bool,
+}
+
+/// Git's graph drawing and the commit represented by each row, when present.
+pub struct GraphLine {
+    pub drawing: String,
+    pub commit: Option<String>,
+}
+
+/// Draw the ancestry of the recorded ref tips and occurrence commits. The walk
+/// is bounded; callers must not present it as complete beyond the limit.
+pub fn history_graph(
+    repo: &Path,
+    history: &SecretHistory,
+) -> Result<(Vec<GraphLine>, bool), String> {
+    let mut starts: Vec<String> = history.refs.iter().map(|r| r.tip.clone()).collect();
+    starts.extend(history.commits.iter().map(|c| c.commit.clone()));
+    starts.sort();
+    starts.dedup();
+    if starts.is_empty() {
+        return Ok((Vec::new(), false));
+    }
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args([
+            "log",
+            "--graph",
+            "--topo-order",
+            "--format=%H",
+            "--max-count=501",
+        ])
+        .args(&starts)
+        .output()
+        .map_err(|e| format!("Could not start git: {e}"))?;
+    if !output.status.success() {
+        return Err("Could not draw commit history.".into());
+    }
+    let text = String::from_utf8(output.stdout).map_err(|_| "Invalid Git graph output")?;
+    let mut count = 0;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let commit = line
+            .split_whitespace()
+            .last()
+            .filter(|s| s.len() >= 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
+        if commit.is_some() {
+            count += 1;
+        }
+        if count > 500 {
+            break;
+        }
+        let drawing = match commit {
+            Some(id) => line[..line.len() - id.len()].to_owned(),
+            None => line.to_owned(),
+        };
+        lines.push(GraphLine {
+            drawing,
+            commit: commit.map(str::to_owned),
+        });
+    }
+    Ok((lines, count > 500))
 }
 
 /// Locate reported finding commits in the supplied branch histories. This only reports
@@ -129,6 +190,8 @@ pub fn secret_history(
         refs: snapshots,
         commits,
         unplaced,
+        shallow: run("git", &["rev-parse", "--is-shallow-repository"], Some(repo))?.trim()
+            == "true",
     })
 }
 

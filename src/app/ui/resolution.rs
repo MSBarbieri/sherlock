@@ -1,3 +1,4 @@
+mod files;
 mod redaction;
 mod related;
 
@@ -101,6 +102,7 @@ impl App {
                 for report in &f.evidence { ui.label(format!("{} · {}", mask_known_values(report.scanner, &known_values), mask_known_values(&report.rule, &known_values))); }
                 let related = self.linked_groups.iter().find(|group| group.contains(&index)).cloned().unwrap_or_else(|| vec![index]);
                 self.render_related_findings(ui, index, &f, &related, busy, known_values, &mut select_related);
+                self.render_file_inspection(ui, &f, &related, busy, known_values);
                 if !f.secret.is_empty() {
                     ui.separator();
                     ui.label("Link or unlink another detected value");
@@ -140,6 +142,7 @@ impl App {
         if let Some(index) = select_related {
             self.revealed = None;
             self.history_output = None;
+            self.file_preview = None;
             self.completion_output = None;
             self.selected = Some(index);
             self.branches.clear();

@@ -43,7 +43,9 @@ pub struct App {
     scanner_used: Option<Scanner>,
     completion_output: Option<String>,
     scanner_findings: Vec<Finding>,
-    history_output: Option<String>,
+    history_output: Option<Result<HistoryView, String>>,
+    file_preview: Option<(usize, Result<sherlock_git::FilePreview, String>)>,
+    file_search: String,
     linked_groups: Vec<Vec<usize>>,
     saved_links: Vec<sherlock_reviews::links::LinkEdge>,
     link_candidate: Option<usize>,
@@ -64,6 +66,12 @@ pub struct App {
     scan_completed: bool,
     filter: ReviewFilter,
     search: String,
+}
+struct HistoryView {
+    history: sherlock_git::SecretHistory,
+    lines: Vec<sherlock_git::GraphLine>,
+    truncated: bool,
+    finding_indices: Vec<usize>,
 }
 impl Default for App {
     fn default() -> Self {
@@ -86,6 +94,8 @@ impl Default for App {
             completion_output: None,
             scanner_findings: Vec::new(),
             history_output: None,
+            file_preview: None,
+            file_search: String::new(),
             linked_groups: Vec::new(),
             saved_links: Vec::new(),
             link_candidate: None,
@@ -111,10 +121,16 @@ impl Default for App {
 }
 impl App {
     fn logo(&mut self, ctx: &egui::Context, dark_mode: bool) -> &egui::TextureHandle {
-        let texture = if dark_mode { &mut self.logo_dark } else { &mut self.logo_light };
+        let texture = if dark_mode {
+            &mut self.logo_dark
+        } else {
+            &mut self.logo_light
+        };
         texture.get_or_insert_with(|| {
-            let mut icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/sherlock-256.png"))
-                .expect("embedded Sherlock logo must be a valid PNG");
+            let mut icon = eframe::icon_data::from_png_bytes(include_bytes!(
+                "../assets/icons/sherlock-256.png"
+            ))
+            .expect("embedded Sherlock logo must be a valid PNG");
             // The original navy mark has too little contrast against the dark UI.
             if dark_mode {
                 for pixel in icon.rgba.chunks_exact_mut(4) {
@@ -124,7 +140,11 @@ impl App {
                 }
             }
             ctx.load_texture(
-                if dark_mode { "sherlock-logo-dark" } else { "sherlock-logo-light" },
+                if dark_mode {
+                    "sherlock-logo-dark"
+                } else {
+                    "sherlock-logo-light"
+                },
                 egui::ColorImage::from_rgba_unmultiplied(
                     [icon.width as usize, icon.height as usize],
                     &icon.rgba,
