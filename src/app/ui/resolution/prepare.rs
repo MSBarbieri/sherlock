@@ -46,6 +46,7 @@ impl App {
                 .collect();
             let value = f.secret.clone();
             self.prepared = None;
+            self.rewritten_history = None;
             self.verification_output = None;
             self.exact_locations.clear();
             self.exact_location_error = None;
@@ -71,6 +72,7 @@ impl App {
                             source: p,
                             destination: d,
                             source_refs: refs.iter().map(|entry| entry.name.clone()).collect(),
+                            source_tips: refs.iter().map(|entry| entry.tip.clone()).collect(),
                             excluded_refs,
                             has_unplaced_findings,
                             refs: output_refs,

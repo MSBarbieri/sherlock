@@ -98,6 +98,7 @@ impl App {
                     {
                         self.page = Page::Discovery;
                         self.revealed = None;
+                        self.file_reveal = false;
                     }
                     ui.add_space(8.0);
                     super::icons::show(ui, super::icons::Icon::Finding);

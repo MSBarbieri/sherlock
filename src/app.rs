@@ -44,7 +44,13 @@ pub struct App {
     completion_output: Option<String>,
     scanner_findings: Vec<Finding>,
     history_output: Option<Result<HistoryView, String>>,
+    history_limit: usize,
+    history_selected_commit: Option<String>,
+    rewritten_history: Option<Result<HistoryView, String>>,
     file_preview: Option<(usize, Result<sherlock_git::FilePreview, String>)>,
+    file_comparison: Option<(usize, Result<sherlock_git::FileComparison, String>)>,
+    file_reveal: bool,
+    file_side_by_side: bool,
     file_search: String,
     linked_groups: Vec<Vec<usize>>,
     saved_links: Vec<sherlock_reviews::links::LinkEdge>,
@@ -59,6 +65,7 @@ pub struct App {
     bulk_review: Review,
     bulk_confirm: bool,
     branches: Vec<sherlock_git::RefSnapshot>,
+    branch_snapshot_stale: bool,
     checked: Vec<bool>,
     status: String,
     receiver: Option<Receiver<ResultMessage>>,
@@ -94,7 +101,13 @@ impl Default for App {
             completion_output: None,
             scanner_findings: Vec::new(),
             history_output: None,
+            history_limit: 500,
+            history_selected_commit: None,
+            rewritten_history: None,
             file_preview: None,
+            file_comparison: None,
+            file_reveal: false,
+            file_side_by_side: false,
             file_search: String::new(),
             linked_groups: Vec::new(),
             saved_links: Vec::new(),
@@ -109,6 +122,7 @@ impl Default for App {
             bulk_review: Review::FalsePositive,
             bulk_confirm: false,
             branches: vec![],
+            branch_snapshot_stale: false,
             checked: vec![],
             status: "Choose a repository to begin.".into(),
             receiver: None,
@@ -161,6 +175,9 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll_tasks(ctx);
         self.poll_automatic_scan(ctx);
+        if self.page != Page::Resolution {
+            self.file_reveal = false;
+        }
         let busy = self.receiver.is_some();
         if self.project_root.is_none() {
             self.render_project_welcome(ctx);

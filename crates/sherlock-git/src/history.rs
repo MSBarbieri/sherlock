@@ -47,6 +47,15 @@ pub fn history_graph(
     repo: &Path,
     history: &SecretHistory,
 ) -> Result<(Vec<GraphLine>, bool), String> {
+    history_graph_page(repo, history, 500)
+}
+
+pub fn history_graph_page(
+    repo: &Path,
+    history: &SecretHistory,
+    limit: usize,
+) -> Result<(Vec<GraphLine>, bool), String> {
+    let count_limit = limit.checked_add(1).ok_or("History limit too large")?;
     let mut starts: Vec<String> = history.refs.iter().map(|r| r.tip.clone()).collect();
     starts.extend(history.commits.iter().map(|c| c.commit.clone()));
     starts.sort();
@@ -56,13 +65,8 @@ pub fn history_graph(
     }
     let output = Command::new("git")
         .current_dir(repo)
-        .args([
-            "log",
-            "--graph",
-            "--topo-order",
-            "--format=%H",
-            "--max-count=501",
-        ])
+        .args(["log", "--graph", "--topo-order", "--format=%H"])
+        .arg(format!("--max-count={count_limit}"))
         .args(&starts)
         .output()
         .map_err(|e| format!("Could not start git: {e}"))?;
@@ -80,7 +84,7 @@ pub fn history_graph(
         if commit.is_some() {
             count += 1;
         }
-        if count > 500 {
+        if count > limit {
             break;
         }
         let drawing = match commit {
@@ -92,7 +96,7 @@ pub fn history_graph(
             commit: commit.map(str::to_owned),
         });
     }
-    Ok((lines, count > 500))
+    Ok((lines, count > limit))
 }
 
 /// Locate reported finding commits in the supplied branch histories. This only reports

@@ -22,7 +22,9 @@ pub(super) enum ResultMessage {
     ScannerCheck(Scanner, Result<(String, Vec<Finding>), String>),
     Completion(Result<Option<sherlock_reviews::links::CompletionRecord>, String>),
     History(Result<HistoryView, String>),
+    RewrittenHistory(Result<HistoryView, String>),
     FilePreview(usize, Result<sherlock_git::FilePreview, String>),
+    FileComparison(usize, Result<sherlock_git::FileComparison, String>),
     LinkGroups(Result<LinkData, String>),
     Scan(Result<Vec<Finding>, String>),
     Branches(Result<Vec<sherlock_git::RefSnapshot>, String>),
@@ -50,7 +52,10 @@ impl App {
                             self.branches.clear();
                             self.checked.clear();
                             self.history_output = None;
+                            self.rewritten_history = None;
                             self.file_preview = None;
+                            self.file_comparison = None;
+                            self.file_reveal = false;
                             self.prepared = None;
                             self.verification_output = None;
                             self.exact_locations.clear();
@@ -112,6 +117,7 @@ impl App {
                         }
                         ResultMessage::Branches(Ok(b)) => {
                             self.status = format!("Found {} containing refs.", b.len());
+                            self.branch_snapshot_stale = false;
                             self.checked = vec![true; b.len()];
                             self.branches = b;
                         }
@@ -216,6 +222,14 @@ impl App {
                         ResultMessage::FilePreview(index, result) => {
                             self.file_preview = Some((index, result));
                             self.status = "File inspection ready.".into();
+                        }
+                        ResultMessage::RewrittenHistory(result) => {
+                            self.rewritten_history = Some(result);
+                            self.status = "Rewritten history ready.".into();
+                        }
+                        ResultMessage::FileComparison(index, result) => {
+                            self.file_comparison = Some((index, result));
+                            self.status = "Actual file comparison ready.".into();
                         }
                         ResultMessage::ScannerCheck(scanner, Ok((result, findings))) => {
                             self.scanner_findings = findings;

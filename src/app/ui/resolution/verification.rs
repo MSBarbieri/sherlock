@@ -25,6 +25,58 @@ impl App {
                     &known_values,
                 ));
             }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Show rewritten history graph"))
+                .clicked()
+            {
+                let destination = prepared.destination.clone();
+                let refs = prepared.refs.clone();
+                self.rewritten_history = None;
+                self.task(move || ResultMessage::RewrittenHistory((|| {
+                    let names: Vec<_> = refs.iter().map(|r| r.name.clone()).collect();
+                    let history = sherlock_git::secret_history(&destination, &[], &names)?;
+                    if history.refs.iter().zip(&refs).any(|(current, recorded)| current.tip != recorded.tip) {
+                        return Err("A rewritten branch changed since preparation; this graph would not describe the recorded result.".into());
+                    }
+                    let (lines, truncated) = sherlock_git::history_graph(&destination, &history)?;
+                    Ok(HistoryView { history, lines, truncated, finding_indices: Vec::new() })
+                })()));
+            }
+            if let Some(graph) = &self.rewritten_history {
+                match graph {
+                    Err(error) => {
+                        ui.colored_label(Color32::YELLOW, mask_known_values(error, known_values));
+                    }
+                    Ok(graph) => {
+                        ui.label("Rewritten history · paired branch tips are listed above. This graph does not assert that unmarked commits are clean.");
+                        if graph.truncated {
+                            ui.label("Older history is not shown (500-commit limit).");
+                        }
+                        egui::ScrollArea::both()
+                            .id_salt("rewritten_history_graph")
+                            .max_height(260.0)
+                            .show(ui, |ui| {
+                                for line in &graph.lines {
+                                    let id = line.commit.as_deref().unwrap_or("");
+                                    let refs = graph
+                                        .history
+                                        .refs
+                                        .iter()
+                                        .filter(|r| r.tip == id)
+                                        .map(|r| mask_known_values(&r.name, known_values))
+                                        .collect::<Vec<_>>()
+                                        .join(", ");
+                                    ui.monospace(format!(
+                                        "{}{}  {}",
+                                        line.drawing,
+                                        mask_known_values(&id[..id.len().min(10)], known_values),
+                                        refs
+                                    ));
+                                }
+                            });
+                    }
+                }
+            }
             ui.label("Checks the exact detected value in file blobs at the recorded output tips, including binary files. Does not scan commit messages, LFS payloads, submodules, or other refs.");
             if ui
                 .add_enabled(

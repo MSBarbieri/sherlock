@@ -40,6 +40,9 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|old| old.refs != snapshot.refs)
                         {
+                            if !self.branches.is_empty() {
+                                self.branch_snapshot_stale = true;
+                            }
                             self.automatic_scan_pending = true;
                             self.scan_target = Some(project.clone());
                             self.monitor.scan_after = Some(now + DEBOUNCE);

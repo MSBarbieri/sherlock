@@ -38,31 +38,11 @@ impl App {
             )
             .clicked()
         {
-            let repo = self.repo();
-            let occurrences: Vec<Finding> =
-                related.iter().map(|&i| self.findings[i].clone()).collect();
-            self.history_output = None;
-            self.status = "Loading reported commit history…".into();
-            let finding_indices = related.to_vec();
-            self.task(move || {
-                ResultMessage::History((|| {
-                    let mut names = std::collections::BTreeSet::new();
-                    let placed = sherlock_git::secret_history(&repo, &occurrences, &[])?;
-                    for commit in &placed.commits {
-                        names.extend(sherlock_git::branches(&repo, &commit.commit)?);
-                    }
-                    let names: Vec<_> = names.into_iter().collect();
-                    let history = sherlock_git::secret_history(&repo, &occurrences, &names)?;
-                    let (lines, truncated) = sherlock_git::history_graph(&repo, &history)?;
-                    Ok(HistoryView {
-                        history,
-                        lines,
-                        truncated,
-                        finding_indices,
-                    })
-                })())
-            });
+            self.history_limit = 500;
+            self.history_selected_commit = None;
+            self.load_history(related);
         }
+        let mut expand_history = false;
         let mut navigate = None;
         if let Some(history) = &self.history_output {
             match history {
@@ -83,14 +63,65 @@ impl App {
                     if view.truncated {
                         ui.colored_label(
                             Color32::YELLOW,
-                            "History is limited to 500 commits; older ancestry is not shown.",
+                            "Older ancestry is not shown until more history is loaded.",
                         );
+                    }
+                    if view.truncated
+                        && ui
+                            .add_enabled(!busy, egui::Button::new("Load more history"))
+                            .clicked()
+                    {
+                        expand_history = true;
                     }
                     egui::ScrollArea::both()
                         .id_salt("history_graph")
                         .max_height(320.0)
                         .show(ui, |ui| {
-                            for line in &view.lines {
+                            let mut rows = view.lines.iter().peekable();
+                            while let Some(line) = rows.next() {
+                                let collapsible = |row: &sherlock_git::GraphLine| {
+                                    row.commit.as_ref().is_some_and(|id| {
+                                        row.drawing.chars().all(|c| c == '*' || c == ' ')
+                                            && !view
+                                                .history
+                                                .commits
+                                                .iter()
+                                                .any(|commit| commit.commit == *id)
+                                            && !view
+                                                .history
+                                                .refs
+                                                .iter()
+                                                .any(|reference| reference.tip == *id)
+                                    })
+                                };
+                                if collapsible(line) {
+                                    let mut stretch = vec![line];
+                                    while rows.peek().is_some_and(|row| collapsible(row)) {
+                                        stretch.push(rows.next().unwrap());
+                                    }
+                                    if stretch.len() > 1 {
+                                        ui.collapsing(
+                                            format!(
+                                                "│  ⋯ {} commits without known findings",
+                                                stretch.len()
+                                            ),
+                                            |ui| {
+                                                for row in &stretch {
+                                                    let id = row.commit.as_deref().unwrap_or("");
+                                                    ui.monospace(format!(
+                                                        "{}{} ○",
+                                                        row.drawing,
+                                                        mask_known_values(
+                                                            &id[..id.len().min(10)],
+                                                            known_values
+                                                        )
+                                                    ));
+                                                }
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                }
                                 let Some(id) = &line.commit else {
                                     ui.monospace(&line.drawing);
                                     continue;
@@ -126,7 +157,7 @@ impl App {
                                 let title = format!(
                                     "{}{} {}  {}",
                                     line.drawing,
-                                    &id[..id.len().min(10)],
+                                    mask_known_values(&id[..id.len().min(10)], known_values),
                                     marker,
                                     labels.join(", ")
                                 );
@@ -137,16 +168,42 @@ impl App {
                                         ))
                                         .clicked()
                                     {
-                                        navigate = commit
-                                            .finding_indices
-                                            .first()
-                                            .map(|i| view.finding_indices[*i]);
+                                        self.history_selected_commit = Some(commit.commit.clone());
                                     }
                                 } else {
                                     ui.monospace(title);
                                 }
                             }
                         });
+                    if let Some(commit) = self.history_selected_commit.as_ref().and_then(|id| {
+                        view.history
+                            .commits
+                            .iter()
+                            .find(|commit| &commit.commit == id)
+                    }) {
+                        ui.label(format!(
+                            "Observed findings at {}",
+                            mask_known_values(&commit.commit, known_values)
+                        ));
+                        for local_index in &commit.finding_indices {
+                            let index = view.finding_indices[*local_index];
+                            let item = &self.findings[index];
+                            let value = if item.secret == f.secret {
+                                "current rewrite value"
+                            } else {
+                                "linked value"
+                            };
+                            let label = format!(
+                                "{}:{} · {} · {value}",
+                                mask_known_values(&item.file, known_values),
+                                mask_known_values(&item.line, known_values),
+                                mask_known_values(&item.rule, known_values)
+                            );
+                            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
+                                navigate = Some(index);
+                            }
+                        }
+                    }
                     for unplaced in &view.history.unplaced {
                         let finding = &self.findings[view.finding_indices[unplaced.finding_index]];
                         ui.label(format!(
@@ -159,6 +216,10 @@ impl App {
                 }
             }
         }
+        if expand_history {
+            self.history_limit = self.history_limit.saturating_add(500);
+            self.load_history(related);
+        }
         if let Some(index) = navigate {
             if self.findings[index].secret != f.secret {
                 self.branches.clear();
@@ -167,6 +228,8 @@ impl App {
             self.selected = Some(index);
             self.revealed = None;
             self.file_preview = None;
+            self.file_comparison = None;
+            self.file_reveal = false;
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -177,6 +240,12 @@ impl App {
                     .weak(),
             );
         });
+        if self.branch_snapshot_stale {
+            ui.colored_label(
+                Color32::YELLOW,
+                "Repository refs changed. Refresh affected branches before preparing a rewrite.",
+            );
+        }
         egui::ScrollArea::vertical()
             .max_height(150.0)
             .show(ui, |ui| {
@@ -205,5 +274,31 @@ impl App {
                 ui.label(RichText::new("Some findings have no commit, so their affected branches could not be identified.").color(Color32::YELLOW));
             }
         }
+    }
+    fn load_history(&mut self, related: &[usize]) {
+        let repo = self.repo();
+        let occurrences: Vec<Finding> = related.iter().map(|&i| self.findings[i].clone()).collect();
+        let finding_indices = related.to_vec();
+        let limit = self.history_limit;
+        self.history_output = None;
+        self.status = "Loading reported commit history…".into();
+        self.task(move || {
+            ResultMessage::History((|| {
+                let placed = sherlock_git::secret_history(&repo, &occurrences, &[])?;
+                let mut names = std::collections::BTreeSet::new();
+                for commit in &placed.commits {
+                    names.extend(sherlock_git::branches(&repo, &commit.commit)?);
+                }
+                let names: Vec<_> = names.into_iter().collect();
+                let history = sherlock_git::secret_history(&repo, &occurrences, &names)?;
+                let (lines, truncated) = sherlock_git::history_graph_page(&repo, &history, limit)?;
+                Ok(HistoryView {
+                    history,
+                    lines,
+                    truncated,
+                    finding_indices,
+                })
+            })())
+        });
     }
 }

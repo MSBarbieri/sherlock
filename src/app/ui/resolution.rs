@@ -143,6 +143,8 @@ impl App {
             self.revealed = None;
             self.history_output = None;
             self.file_preview = None;
+            self.file_comparison = None;
+            self.file_reveal = false;
             self.completion_output = None;
             self.selected = Some(index);
             self.branches.clear();

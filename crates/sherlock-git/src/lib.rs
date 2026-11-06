@@ -5,11 +5,12 @@ mod observation;
 mod preview;
 mod verification;
 pub use history::{
-    history_graph, secret_history, GraphLine, HistoryCommit, SecretHistory, UnplacedFinding,
+    history_graph, history_graph_page, secret_history, GraphLine, HistoryCommit, SecretHistory,
+    UnplacedFinding,
 };
 pub use locations::{exact_history_locations, ExactLocation};
 pub use observation::{repository_snapshot, RefState, RepositorySnapshot, WorktreeState};
-pub use preview::{preview_file, FilePreview};
+pub use preview::{compare_files, preview_file, FileComparison, FilePreview};
 pub use verification::{verify_exact_values, VerifiedRef};
 
 use sherlock_domain::Finding;

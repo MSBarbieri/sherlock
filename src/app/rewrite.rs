@@ -5,6 +5,7 @@ pub(super) struct PreparedRewrite {
     pub(super) source: PathBuf,
     pub(super) destination: PathBuf,
     pub(super) source_refs: Vec<String>,
+    pub(super) source_tips: Vec<String>,
     pub(super) excluded_refs: Vec<String>,
     pub(super) has_unplaced_findings: bool,
     pub(super) refs: Vec<sherlock_git::RefSnapshot>,
