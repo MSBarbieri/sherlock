@@ -188,11 +188,26 @@ impl App {
                         for local_index in &commit.finding_indices {
                             let index = view.finding_indices[*local_index];
                             let item = &self.findings[index];
-                            let value = if item.secret == f.secret {
-                                "current rewrite value"
-                            } else {
-                                "linked value"
-                            };
+                            let mut values = Vec::<&str>::new();
+                            for &related_index in related {
+                                let value = self.findings[related_index].secret.as_str();
+                                if !value.is_empty() && !values.contains(&value) {
+                                    values.push(value);
+                                }
+                            }
+                            let number = values
+                                .iter()
+                                .position(|value| *value == item.secret)
+                                .map(|position| position + 1);
+                            let value = format!(
+                                "Value {}{}",
+                                number.map_or_else(|| "unavailable".to_owned(), |n| n.to_string()),
+                                if item.secret == f.secret {
+                                    " · current rewrite target"
+                                } else {
+                                    " · linked"
+                                }
+                            );
                             let label = format!(
                                 "{}:{} · {} · {value}",
                                 mask_known_values(&item.file, known_values),
@@ -243,7 +258,7 @@ impl App {
         if self.branch_snapshot_stale {
             ui.colored_label(
                 Color32::YELLOW,
-                "Repository refs changed. Refresh affected branches before preparing a rewrite.",
+                "Repository refs changed. Refresh affected branches and reload the graph before preparing a rewrite.",
             );
         }
         egui::ScrollArea::vertical()

@@ -40,7 +40,7 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|old| old.refs != snapshot.refs)
                         {
-                            if !self.branches.is_empty() {
+                            if !self.branches.is_empty() || self.history_output.is_some() {
                                 self.branch_snapshot_stale = true;
                             }
                             self.automatic_scan_pending = true;

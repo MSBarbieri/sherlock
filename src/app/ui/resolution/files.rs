@@ -58,6 +58,7 @@ impl App {
                                 let value = target.secret.clone();
                                 self.file_preview = None;
                                 self.file_comparison = None;
+                                self.file_reveal = false;
                                 self.status = "Loading historical file…".into();
                                 self.task(move || ResultMessage::FilePreview(index, sherlock_git::preview_file(&repo, &commit, &path, &value)));
                             }
@@ -74,14 +75,14 @@ impl App {
                     ui.colored_label(Color32::YELLOW, "The configured replacement contains a known value.");
                 }
                 let correspondence = self.prepared.as_ref().filter(|prepared| prepared.source == self.repo() && prepared.value == target.secret).and_then(|prepared| {
-                    prepared.source_tips.iter().position(|tip| tip == &finding.commit).map(|position| (prepared.destination.clone(), prepared.source_tips[position].clone(), prepared.refs[position].tip.clone()))
+                    prepared.source_tips.iter().position(|tip| tip == &finding.commit).map(|position| (prepared.destination.clone(), prepared.source_tips[position].clone(), prepared.refs[position].clone()))
                 });
                 if self.prepared.is_some() {
-                    if let Some((repo, original, rewritten)) = correspondence {
+                    if let Some((repo, original, rewritten_ref)) = correspondence {
                         if ui.add_enabled(!busy, egui::Button::new("Compare actual rewritten file")).clicked() {
                             let path = finding.file.clone();
                             let index = *index;
-                            comparison_request = Some((index, repo, original, rewritten, path));
+                            comparison_request = Some((index, repo, original, rewritten_ref, path));
                         }
                     } else {
                         ui.label("This is a proposed preview. Correspondence to an actual rewritten commit is not available for this finding.");
@@ -99,9 +100,18 @@ impl App {
                         if self.file_side_by_side && ui.available_width() >= 400.0 {
                             ui.columns(2, |columns| {
                                 columns[0].label("Original · proposed preview");
-                                columns[0].monospace(display(&preview.original));
                                 columns[1].label("Proposed result");
-                                columns[1].monospace(display(&preview.rewritten));
+                                for (line_no, line) in preview.original.lines().enumerate() {
+                                    if !target.secret.is_empty() && line.contains(&target.secret) {
+                                        let reported = related.iter().any(|&i| self.findings[i].secret == target.secret && self.findings[i].commit == finding.commit && self.findings[i].file == finding.file && self.findings[i].line.parse::<usize>().ok() == Some(line_no + 1));
+                                        let marker = if reported { "reported line; may include other matches" } else { "unreported exact match" };
+                                        columns[0].colored_label(Color32::YELLOW, format!("{}  [{marker}]", display(line)));
+                                        columns[1].colored_label(Color32::LIGHT_GREEN, display(&line.replace(&target.secret, "[REDACTED]")));
+                                    } else {
+                                        columns[0].monospace(display(line));
+                                        columns[1].monospace(display(line));
+                                    }
+                                }
                             });
                         } else { egui::ScrollArea::both().id_salt("file_preview").max_height(300.0).show(ui, |ui| {
                             for (line_no, line) in preview.original.lines().enumerate() {
@@ -142,13 +152,22 @@ impl App {
                 ui.label("Select an affected file to inspect its proposed changes.");
             }
         });
-        if let Some((index, repo, original, rewritten, path)) = comparison_request {
+        if let Some((index, repo, original, rewritten_ref, path)) = comparison_request {
             self.file_comparison = None;
             self.task(move || {
-                ResultMessage::FileComparison(
-                    index,
-                    sherlock_git::compare_files(&repo, &original, &rewritten, &path),
-                )
+                ResultMessage::FileComparison(index, (|| {
+                    let refs = vec![rewritten_ref.name.clone()];
+                    let check = || -> Result<(), String> {
+                        if sherlock_git::snapshot_refs(&repo, &refs)?[0].tip != rewritten_ref.tip {
+                            return Err("The rewritten branch changed since preparation; comparison is unavailable.".into());
+                        }
+                        Ok(())
+                    };
+                    check()?;
+                    let result = sherlock_git::compare_files(&repo, &original, &rewritten_ref.tip, &path)?;
+                    check()?;
+                    Ok(result)
+                })())
             });
         }
     }
