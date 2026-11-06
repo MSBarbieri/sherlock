@@ -1,4 +1,7 @@
 //! Git repository discovery and creation of isolated redacted mirrors.
+mod verification;
+pub use verification::{verify_exact_values, VerifiedRef};
+
 use sherlock_domain::Finding;
 use std::{
     path::{Path, PathBuf},

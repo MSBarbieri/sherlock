@@ -9,6 +9,6 @@ Sherlock is a Cargo workspace. The desktop executable composes the libraries; th
 - `sherlock-rewrite` rewrites Git objects and returns new commit IDs; callers decide whether to update refs. Its interface is deliberately scoped to literal replacement in supported text blobs, not full git-filter-repo compatibility.
 - `src/app.rs` owns egui state and coordinates background operations. `src/main.rs` starts the desktop application.
 
-The workflow still requires external `git`, `gitleaks`, and/or `trufflehog` executables as described in the README. The library interfaces and errors remain early-stage and may evolve as the wayfinder decisions are resolved. In particular, rewritten mirrors retain original sensitive refs, and the UI does not yet verify the rewritten history.
+The workflow still requires external `git`, `gitleaks`, and/or `trufflehog` executables as described in the README. The library interfaces and errors remain early-stage and may evolve as the wayfinder decisions are resolved. In particular, rewritten mirrors retain original sensitive refs, and exact-value checks cover reachable file blobs at recorded tips, not commit messages, LFS payloads, submodule repositories, unselected refs, or broader scanner coverage.
 
 Run all crate tests with `cargo test --workspace`.

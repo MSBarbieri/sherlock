@@ -39,12 +39,33 @@ fn finding_matches(finding: &Finding, filter: ReviewFilter, search: &str) -> boo
             }))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Discovery,
+    Resolution,
+}
+
+#[derive(Clone)]
+struct PreparedRewrite {
+    source: PathBuf,
+    destination: PathBuf,
+    refs: Vec<sherlock_git::RefSnapshot>,
+    value: String,
+}
+
 enum ResultMessage {
+    Rewrite(Result<(PreparedRewrite, String), String>),
+    Verification(Result<String, String>),
+    ScannerCheck(Result<String, String>),
     Scan(Result<Vec<Finding>, String>),
     Branches(Result<Vec<sherlock_git::RefSnapshot>, String>),
     Status(Result<String, String>),
 }
 pub struct App {
+    page: Page,
+    prepared: Option<PreparedRewrite>,
+    verification_output: Option<String>,
+    scanner_output: Option<String>,
     repo: String,
     scanner: Scanner,
     findings: Vec<Finding>,
@@ -61,6 +82,10 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            page: Page::Discovery,
+            prepared: None,
+            verification_output: None,
+            scanner_output: None,
             repo: String::new(),
             scanner: Scanner::Gitleaks,
             findings: vec![],
@@ -115,8 +140,31 @@ impl eframe::App for App {
                             self.checked = vec![true; b.len()];
                             self.branches = b;
                         }
+                        ResultMessage::Rewrite(Ok((prepared, status))) => {
+                            self.prepared = Some(prepared);
+                            self.status = status;
+                        }
+                        ResultMessage::Verification(Ok(result)) => {
+                            self.verification_output = Some(result);
+                            self.status =
+                                "Exact-value check complete. Review the results below.".into();
+                        }
+                        ResultMessage::Verification(Err(e)) => {
+                            self.verification_output = Some(format!("Check incomplete: {e}"));
+                            self.status = "Exact-value check failed.".into();
+                        }
+                        ResultMessage::ScannerCheck(Ok(result)) => {
+                            self.scanner_output = Some(result);
+                            self.status =
+                                "Scanner check complete. Review the results below.".into();
+                        }
+                        ResultMessage::ScannerCheck(Err(e)) => {
+                            self.scanner_output = Some(format!("Scanner check incomplete: {e}"));
+                            self.status = "Scanner check failed.".into();
+                        }
                         ResultMessage::Status(Ok(s)) => self.status = s,
-                        ResultMessage::Scan(Err(e))
+                        ResultMessage::Rewrite(Err(e))
+                        | ResultMessage::Scan(Err(e))
                         | ResultMessage::Branches(Err(e))
                         | ResultMessage::Status(Err(e)) => self.status = format!("Error: {e}"),
                     }
@@ -136,6 +184,11 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.heading(RichText::new("◈  SHERLOCK").color(Color32::from_rgb(160, 143, 255)));
                 ui.label(RichText::new("  /  repository security").weak());
+                ui.separator();
+                ui.selectable_value(&mut self.page, Page::Discovery, "1  Discovery");
+                ui.add_enabled_ui(self.selected.is_some(), |ui| {
+                    ui.selectable_value(&mut self.page, Page::Resolution, "2  Resolve secret");
+                });
             });
             ui.add_space(8.0);
         });
@@ -150,105 +203,116 @@ impl eframe::App for App {
                 });
                 ui.label(&self.status);
             });
-        egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(260.0)
-            .show(ctx, |ui| {
-                ui.add_space(12.0);
-                ui.heading("Workspace");
-                ui.add_space(8.0);
-                ui.label("Repository");
-                if ui
-                    .add_enabled(
-                        !busy,
-                        egui::TextEdit::singleline(&mut self.repo)
-                            .hint_text("Select a local repository"),
-                    )
-                    .changed()
-                {
-                    self.scan_completed = false;
-                    self.findings.clear();
-                    self.selected = None;
-                    self.branches.clear();
-                    self.checked.clear();
-                    self.destination = sherlock_git::suggested_destination(&self.repo())
-                        .display()
-                        .to_string();
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Choose folder…"))
-                    .clicked()
-                {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+        if self.page == Page::Discovery {
+            egui::SidePanel::left("sidebar")
+                .resizable(true)
+                .default_width(260.0)
+                .show(ctx, |ui| {
+                    ui.add_space(12.0);
+                    ui.heading("Workspace");
+                    ui.add_space(8.0);
+                    ui.label("Repository");
+                    if ui
+                        .add_enabled(
+                            !busy,
+                            egui::TextEdit::singleline(&mut self.repo)
+                                .hint_text("Select a local repository"),
+                        )
+                        .changed()
+                    {
                         self.scan_completed = false;
-                        self.repo = p.display().to_string();
-                        self.destination = sherlock_git::suggested_destination(&p)
-                            .display()
-                            .to_string();
                         self.findings.clear();
                         self.selected = None;
                         self.branches.clear();
                         self.checked.clear();
+                        self.destination = sherlock_git::suggested_destination(&self.repo())
+                            .display()
+                            .to_string();
                     }
-                }
-                ui.separator();
-                ui.label("Scanner");
-                ui.add_enabled_ui(!busy, |ui| {
-                    egui::ComboBox::from_id_salt("scanner")
-                        .selected_text(self.scanner.label())
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.scanner, Scanner::Both, "Both scanners");
-                            ui.selectable_value(&mut self.scanner, Scanner::Gitleaks, "Gitleaks");
-                            ui.selectable_value(
-                                &mut self.scanner,
-                                Scanner::TruffleHog,
-                                "TruffleHog",
-                            );
-                        });
-                });
-                if ui
-                    .add_enabled(
-                        !busy && !self.repo.is_empty(),
-                        egui::Button::new("▶  Scan repository"),
-                    )
-                    .clicked()
-                {
-                    let p = self.repo();
-                    let s = self.scanner;
-                    self.status = format!("Scanning with {}…", s.label());
-                    self.scan_completed = false;
-                    self.findings.clear();
-                    self.selected = None;
-                    self.branches.clear();
-                    self.checked.clear();
-                    self.task(move || ResultMessage::Scan(sherlock_scan::scan(&p, s)));
-                }
-                ui.add_space(8.0);
-                if ui
-                    .add_enabled(
-                        !busy && !self.repo.is_empty(),
-                        egui::Button::new("↻  Fetch all remotes"),
-                    )
-                    .clicked()
-                {
-                    let p = self.repo();
-                    self.branches.clear();
-                    self.checked.clear();
-                    self.status = "Fetching remotes…".into();
-                    self.task(move || ResultMessage::Status(sherlock_git::fetch(&p)));
-                }
-                ui.add_space(16.0);
-                ui.label(
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Choose folder…"))
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                            self.scan_completed = false;
+                            self.repo = p.display().to_string();
+                            self.destination = sherlock_git::suggested_destination(&p)
+                                .display()
+                                .to_string();
+                            self.findings.clear();
+                            self.selected = None;
+                            self.branches.clear();
+                            self.checked.clear();
+                        }
+                    }
+                    ui.separator();
+                    ui.label("Scanner");
+                    ui.add_enabled_ui(!busy, |ui| {
+                        egui::ComboBox::from_id_salt("scanner")
+                            .selected_text(self.scanner.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.scanner,
+                                    Scanner::Both,
+                                    "Both scanners",
+                                );
+                                ui.selectable_value(
+                                    &mut self.scanner,
+                                    Scanner::Gitleaks,
+                                    "Gitleaks",
+                                );
+                                ui.selectable_value(
+                                    &mut self.scanner,
+                                    Scanner::TruffleHog,
+                                    "TruffleHog",
+                                );
+                            });
+                    });
+                    if ui
+                        .add_enabled(
+                            !busy && !self.repo.is_empty(),
+                            egui::Button::new("▶  Scan repository"),
+                        )
+                        .clicked()
+                    {
+                        let p = self.repo();
+                        let s = self.scanner;
+                        self.status = format!("Scanning with {}…", s.label());
+                        self.scan_completed = false;
+                        self.findings.clear();
+                        self.selected = None;
+                        self.branches.clear();
+                        self.checked.clear();
+                        self.task(move || ResultMessage::Scan(sherlock_scan::scan(&p, s)));
+                    }
+                    ui.add_space(8.0);
+                    if ui
+                        .add_enabled(
+                            !busy && !self.repo.is_empty(),
+                            egui::Button::new("↻  Fetch all remotes"),
+                        )
+                        .clicked()
+                    {
+                        let p = self.repo();
+                        self.branches.clear();
+                        self.checked.clear();
+                        self.status = "Fetching remotes…".into();
+                        self.task(move || ResultMessage::Status(sherlock_git::fetch(&p)));
+                    }
+                    ui.add_space(16.0);
+                    ui.label(
                     RichText::new(
                         "Fetch updates local remote-tracking refs. Scans and rewrites run locally.",
                     )
                     .small()
                     .weak(),
                 );
-            });
+                });
+        }
         let mut select_related = None;
-        egui::SidePanel::right("detail").resizable(true).default_width(360.0).show(ctx, |ui| {
-            ui.add_space(12.0); ui.heading("Finding details"); ui.separator();
+        if self.page == Page::Resolution {
+            egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(12.0); ui.heading("Secret resolution"); ui.separator();
             egui::ScrollArea::vertical().id_salt("detail_content").show(ui, |ui| {
             if let Some(index) = self.selected { let f = self.findings[index].clone();
                 ui.label(RichText::new(&f.rule).strong().color(Color32::from_rgb(197, 184, 255))); ui.label(format!("{} · line {}", f.file, f.line)); ui.label(format!("Commit  {}", f.commit)); ui.label("Secret  ••••••••••••"); ui.add_space(12.0);
@@ -307,23 +371,65 @@ impl eframe::App for App {
                 ui.separator(); ui.label(RichText::new("PREPARE REDACTED HISTORY").small().weak()); ui.label("New mirror path"); ui.add_enabled(!busy, egui::TextEdit::singleline(&mut self.destination));
                 ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed. Rewritten history is not automatically verified.").small().weak());
                 if ui.add_enabled(!busy && self.checked.iter().any(|x| *x) && !self.destination.is_empty(), egui::Button::new("Create redacted branches")).clicked() {
-                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Status(sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)));
+                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); let value = f.secret.clone(); self.prepared = None; self.verification_output = None; self.scanner_output = None; self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Rewrite((|| { let status = sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)?; let names: Vec<String> = (1..=refs.len()).map(|i| format!("refs/heads/sherlock/redacted-{i}")).collect(); let output_refs = sherlock_git::snapshot_refs(&d, &names).map_err(|e| format!("Rewrite finished in {}, but output refs could not be recorded: {e}", d.display()))?; Ok((PreparedRewrite { source: p, destination: d, refs: output_refs, value }, status)) })()));
+                }
+                if let Some(prepared) = self.prepared.clone().filter(|prepared| prepared.source == self.repo() && prepared.value == f.secret) {
+                    ui.separator();
+                    ui.heading("Check rewritten history");
+                    ui.label(format!("Mirror: {}", prepared.destination.display()));
+                    ui.label("Checks the exact detected value in file blobs at the recorded output tips, including binary files. Does not scan commit messages, LFS payloads, submodules, or other refs.");
+                    if ui.add_enabled(!busy, egui::Button::new("Check exact value in rewritten branches")).clicked() {
+                        let path = prepared.destination.clone(); let refs = prepared.refs.clone(); let value = prepared.value.clone();
+                        self.status = "Checking rewritten history…".into(); self.verification_output = None;
+                        self.task(move || ResultMessage::Verification(sherlock_git::verify_exact_values(&path, &refs, &[value.as_bytes()]).map(|results| {
+                            let mut output = String::from("Exact-value check of reachable file blobs (not a scanner or a guarantee):\n");
+                            for result in results {
+                                let outcome = if result.matching_blobs.is_empty() { "not found".to_owned() } else { format!("found in {} blob(s)", result.matching_blobs.len()) };
+                                output.push_str(&format!("{} @ {}: {} commits checked; {}\n", result.name, result.tip, result.commits_checked, outcome));
+                            }
+                            output
+                        })));
+                    }
+                    if let Some(result) = &self.verification_output { ui.separator(); ui.label(result); }
+                    ui.separator();
+                    ui.label(format!("Scan output branches with {}. Scanner coverage is limited; no findings does not guarantee that the history is clean.", self.scanner.label()));
+                    if ui.add_enabled(!busy, egui::Button::new("Scan rewritten branches")).clicked() {
+                        let path = prepared.destination.clone(); let refs = prepared.refs.clone(); let value = prepared.value.clone(); let scanner = self.scanner;
+                        self.scanner_output = None; self.status = "Scanning rewritten branches…".into();
+                        self.task(move || ResultMessage::ScannerCheck((|| {
+                            let mut output = format!("{} results (scanner coverage is limited):\n", scanner.label());
+                            for entry in refs {
+                                let branch = entry.name.strip_prefix("refs/heads/").ok_or("Invalid output branch name")?;
+                                let report = sherlock_scan::scan_branch(&path, branch, scanner)?;
+                                if report.tip != entry.tip { return Err(format!("{} changed since rewrite; its scan results do not describe the recorded output.", entry.name)); }
+                                let exact = report.findings.iter().filter(|finding| finding.secret == value).count();
+                                output.push_str(&format!("{} @ {}: {} finding(s), {} with the same exact value\n", entry.name, entry.tip, report.findings.len(), exact));
+                            }
+                            Ok(output)
+                        })()));
+                    }
+                    if let Some(result) = &self.scanner_output { ui.separator(); ui.label(result); }
                 }
             } else { ui.label(RichText::new("Select a finding to inspect its commit and affected branches.").weak()); }
             });
         });
+        }
         if let Some(index) = select_related {
             self.selected = Some(index);
             self.branches.clear();
             self.checked.clear();
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        if self.page == Page::Discovery {
+            egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 ui.heading("Findings");
                 ui.label(RichText::new(format!("{}", self.findings.len())).weak());
             });
-            ui.label(RichText::new("Review potential secrets before changing history.").weak());
+            ui.label(RichText::new("Select a finding, then open its secret resolution workspace.").weak());
+            if ui.add_enabled(self.selected.is_some() && !busy, egui::Button::new("Open secret resolution →")).clicked() {
+                self.page = Page::Resolution;
+            }
             if !self.findings.is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Classification:");
@@ -387,6 +493,7 @@ impl eframe::App for App {
                 }
             });
         });
+        }
     }
 }
 

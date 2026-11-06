@@ -62,7 +62,6 @@ pub fn scan(repo: &Path, scanner: Scanner) -> Result<Vec<Finding>, String> {
             "gitleaks",
             &[
                 "git",
-                "--source",
                 repo.to_str().ok_or("Repository path is not UTF-8")?,
                 "--report-format",
                 "json",
@@ -95,6 +94,103 @@ pub fn scan(repo: &Path, scanner: Scanner) -> Result<Vec<Finding>, String> {
         )?;
         parse_trufflehog(&output)
     }
+}
+
+/// Findings produced by scanning one local branch's history at a recorded tip.
+/// Scanner detection and history coverage have limits; an empty result does not
+/// prove that the branch contains no secret.
+pub struct BranchScan {
+    pub branch: String,
+    pub tip: String,
+    pub scanner: Scanner,
+    pub findings: Vec<Finding>,
+}
+
+fn branch_tip(repo: &Path, branch: &str) -> Result<String, String> {
+    if branch.starts_with('-') || branch.is_empty() {
+        return Err("Expected a local branch name".into());
+    }
+    run("git", &["check-ref-format", "--branch", branch], Some(repo))?;
+    let reference = format!("refs/heads/{branch}");
+    let revision = format!("{reference}^{{commit}}");
+    let tip = run(
+        "git",
+        &["rev-parse", "--verify", "--end-of-options", &revision],
+        Some(repo),
+    )?;
+    Ok(tip.trim().to_owned())
+}
+
+/// Scan a named local branch, refusing to present results if its tip changed.
+/// TruffleHog may scan a broader set of refs depending on its version; results
+/// are scanner reports, not proof of complete blob-by-blob coverage.
+pub fn scan_branch(repo: &Path, branch: &str, scanner: Scanner) -> Result<BranchScan, String> {
+    scan_branch_with(repo, branch, scanner, "gitleaks", "trufflehog")
+}
+
+fn scan_branch_with(
+    repo: &Path,
+    branch: &str,
+    scanner: Scanner,
+    gitleaks: &str,
+    trufflehog: &str,
+) -> Result<BranchScan, String> {
+    let tip = branch_tip(repo, branch)?;
+    let repo_str = repo.to_str().ok_or("Repository path is not UTF-8")?;
+    let mut findings = Vec::new();
+    if matches!(scanner, Scanner::Gitleaks | Scanner::Both) {
+        let report = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+        let path = report.path().to_str().ok_or("Report path is not UTF-8")?;
+        run(
+            gitleaks,
+            &[
+                "git",
+                repo_str,
+                "--report-format",
+                "json",
+                "--report-path",
+                path,
+                "--exit-code",
+                "0",
+                "--no-banner",
+                "--log-opts",
+                &tip,
+            ],
+            None,
+        )?;
+        findings = parse_gitleaks(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)?;
+    }
+    if matches!(scanner, Scanner::TruffleHog | Scanner::Both) {
+        let url = format!(
+            "file://{}",
+            repo.canonicalize().map_err(|e| e.to_string())?.display()
+        );
+        let output = run(
+            trufflehog,
+            &[
+                "git",
+                &url,
+                "--json",
+                "--no-update",
+                "--no-verification",
+                "--fail-on-scan-errors",
+                "--skip-additional-refs",
+                "--branch",
+                branch,
+            ],
+            None,
+        )?;
+        merge_findings(&mut findings, parse_trufflehog(&output)?);
+    }
+    if branch_tip(repo, branch)? != tip {
+        return Err("Branch tip changed during scanning; scan the branch again.".into());
+    }
+    Ok(BranchScan {
+        branch: branch.to_owned(),
+        tip,
+        scanner,
+        findings,
+    })
 }
 
 fn parse_gitleaks(text: &str) -> Result<Vec<Finding>, String> {
@@ -161,5 +257,49 @@ mod tests {
         assert_eq!(combined[0].evidence[1].raw["DetectorName"], "rule-b");
         assert!(parse_gitleaks("broken").is_err());
         assert!(parse_trufflehog("broken").is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn scoped_scan_uses_local_branch_and_rejects_tip_changes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        run("git", &["init", "-q"], Some(&repo)).unwrap();
+        run(
+            "git",
+            &["config", "user.email", "test@example.org"],
+            Some(&repo),
+        )
+        .unwrap();
+        run("git", &["config", "user.name", "Test"], Some(&repo)).unwrap();
+        run(
+            "git",
+            &["commit", "-q", "--allow-empty", "-m", "initial"],
+            Some(&repo),
+        )
+        .unwrap();
+        run("git", &["branch", "test-branch"], Some(&repo)).unwrap();
+        let fake = dir.path().join("scanner");
+        std::fs::write(&fake, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/args\"\nwhile [ $# -gt 0 ]; do\n if [ \"$1\" = --report-path ]; then shift; printf '[]' > \"$1\"; fi\n shift\ndone\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let fake = fake.to_str().unwrap();
+        let result = scan_branch_with(&repo, "test-branch", Scanner::Both, fake, fake).unwrap();
+        assert_eq!(result.tip, branch_tip(&repo, "test-branch").unwrap());
+        let args = std::fs::read_to_string(dir.path().join("args")).unwrap();
+        assert!(args.contains("--skip-additional-refs\n--branch\ntest-branch"));
+        assert!(scan_branch_with(&repo, "missing", Scanner::Gitleaks, fake, fake).is_err());
+        assert!(branch_tip(&repo, "--all").is_err());
+
+        std::fs::write(
+            fake,
+            format!(
+                "#!/bin/sh\ngit -C '{}' update-ref refs/heads/test-branch {}\n",
+                repo.display(),
+                "0000000000000000000000000000000000000000"
+            ),
+        )
+        .unwrap();
+        assert!(scan_branch_with(&repo, "test-branch", Scanner::TruffleHog, fake, fake).is_err());
     }
 }
