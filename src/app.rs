@@ -1,14 +1,47 @@
 use eframe::egui::{self, Color32, RichText};
-use sherlock_domain::{Finding, Review};
+use sherlock_domain::{group_by_secret, Finding, Review};
 use sherlock_scan::Scanner;
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver},
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReviewFilter {
+    All,
+    Potential,
+    FalsePositive,
+    AcceptedRisk,
+}
+
+impl ReviewFilter {
+    fn matches(self, review: &Review) -> bool {
+        match self {
+            Self::All => true,
+            Self::Potential => *review == Review::Unreviewed,
+            Self::FalsePositive => *review == Review::FalsePositive,
+            Self::AcceptedRisk => *review == Review::AcceptedRisk,
+        }
+    }
+}
+
+fn finding_matches(finding: &Finding, filter: ReviewFilter, search: &str) -> bool {
+    let query = search.trim().to_lowercase();
+    filter.matches(&finding.review)
+        && (query.is_empty()
+            || [&finding.rule, &finding.file, &finding.commit]
+                .iter()
+                .any(|value| value.to_lowercase().contains(&query))
+            || finding.scanner.to_lowercase().contains(&query)
+            || finding.evidence.iter().any(|report| {
+                report.scanner.to_lowercase().contains(&query)
+                    || report.rule.to_lowercase().contains(&query)
+            }))
+}
+
 enum ResultMessage {
     Scan(Result<Vec<Finding>, String>),
-    Branches(Result<Vec<String>, String>),
+    Branches(Result<Vec<sherlock_git::RefSnapshot>, String>),
     Status(Result<String, String>),
 }
 pub struct App {
@@ -16,12 +49,14 @@ pub struct App {
     scanner: Scanner,
     findings: Vec<Finding>,
     selected: Option<usize>,
-    branches: Vec<String>,
+    branches: Vec<sherlock_git::RefSnapshot>,
     checked: Vec<bool>,
     status: String,
     receiver: Option<Receiver<ResultMessage>>,
     destination: String,
     scan_completed: bool,
+    filter: ReviewFilter,
+    search: String,
 }
 impl Default for App {
     fn default() -> Self {
@@ -36,6 +71,8 @@ impl Default for App {
             receiver: None,
             destination: String::new(),
             scan_completed: false,
+            filter: ReviewFilter::All,
+            search: String::new(),
         }
     }
 }
@@ -71,6 +108,7 @@ impl eframe::App for App {
                             self.findings = f;
                             self.selected = None;
                             self.branches.clear();
+                            self.checked.clear();
                         }
                         ResultMessage::Branches(Ok(b)) => {
                             self.status = format!("Found {} containing refs.", b.len());
@@ -150,6 +188,7 @@ impl eframe::App for App {
                         self.findings.clear();
                         self.selected = None;
                         self.branches.clear();
+                        self.checked.clear();
                     }
                 }
                 ui.separator();
@@ -181,6 +220,7 @@ impl eframe::App for App {
                     self.findings.clear();
                     self.selected = None;
                     self.branches.clear();
+                    self.checked.clear();
                     self.task(move || ResultMessage::Scan(sherlock_scan::scan(&p, s)));
                 }
                 ui.add_space(8.0);
@@ -206,8 +246,10 @@ impl eframe::App for App {
                     .weak(),
                 );
             });
+        let mut select_related = None;
         egui::SidePanel::right("detail").resizable(true).default_width(360.0).show(ctx, |ui| {
             ui.add_space(12.0); ui.heading("Finding details"); ui.separator();
+            egui::ScrollArea::vertical().id_salt("detail_content").show(ui, |ui| {
             if let Some(index) = self.selected { let f = self.findings[index].clone();
                 ui.label(RichText::new(&f.rule).strong().color(Color32::from_rgb(197, 184, 255))); ui.label(format!("{} · line {}", f.file, f.line)); ui.label(format!("Commit  {}", f.commit)); ui.label("Secret  ••••••••••••"); ui.add_space(12.0);
                 ui.label(format!("Classification: {}", f.review.label()));
@@ -230,16 +272,51 @@ impl eframe::App for App {
                 ui.label(RichText::new("Review decisions are stored locally for this repository.").small().weak());
                 ui.label("Scanner evidence:");
                 for report in &f.evidence { ui.label(format!("{} · {}", report.scanner, report.rule)); }
-                if ui.add_enabled(!busy, egui::Button::new("Find containing branches")).clicked() { let p = self.repo(); let c = f.commit.clone(); self.branches.clear(); self.status = "Checking local and remote-tracking refs…".into(); self.task(move || ResultMessage::Branches(sherlock_git::branches(&p, &c))); }
+                let related = group_by_secret(&self.findings).into_iter().find(|group| group.contains(&index)).unwrap_or_default();
+                ui.separator();
+                ui.label(RichText::new("SAME DETECTED VALUE").small().weak());
+                if f.secret.is_empty() {
+                    ui.label("No usable value was reported; this finding is kept separate.");
+                } else {
+                    ui.label(format!("{} finding(s) in this scan", related.len()));
+                    ui.label(RichText::new("Each finding keeps its own classification. This grouping is based on the exact value.").small().weak());
+                    egui::ScrollArea::vertical().id_salt("related_findings").max_height(100.0).show(ui, |ui| {
+                        for related_index in related {
+                            let item = &self.findings[related_index];
+                            let location = format!("{}:{} · {} · {}", if item.file.is_empty() { "Unknown file" } else { &item.file }, if item.line.is_empty() { "?" } else { &item.line }, if item.commit.is_empty() { "Unknown commit".to_owned() } else { item.commit.chars().take(10).collect() }, item.review.label());
+                            if ui.add_enabled(!busy && related_index != index, egui::Button::new(location)).clicked() {
+                                select_related = Some(related_index);
+                            }
+                        }
+                    });
+                }
+                if ui.add_enabled(!busy, egui::Button::new("Find branches for this value")).clicked() { let p = self.repo(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); self.branches.clear(); self.checked.clear(); self.status = "Checking local and remote-tracking refs…".into(); self.task(move || ResultMessage::Branches(sherlock_git::branches_for_findings(&p, &occurrences).and_then(|refs| sherlock_git::snapshot_refs(&p, &refs)))); }
                 ui.add_space(8.0); ui.label(RichText::new("CONTAINING REFS").small().weak());
-                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| { for (i, branch) in self.branches.iter().enumerate() { ui.checkbox(&mut self.checked[i], branch); } });
-                ui.separator(); ui.label(RichText::new("PREPARE REDACTED HISTORY").small().weak()); ui.label("New mirror path"); ui.text_edit_singleline(&mut self.destination);
-                ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed.").small().weak());
+                egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| { for (i, branch) in self.branches.iter().enumerate() { ui.add_enabled(!busy, egui::Checkbox::new(&mut self.checked[i], &branch.name)); } });
+                if !self.branches.is_empty() {
+                    let selected_count = self.checked.iter().filter(|checked| **checked).count();
+                    let excluded_count = self.branches.len() - selected_count;
+                    ui.label(format!("{selected_count} selected · {excluded_count} excluded"));
+                    if excluded_count > 0 {
+                        ui.label(RichText::new("Excluded refs will not get redacted branches and may still contain this value.").color(Color32::YELLOW));
+                    }
+                    if self.findings.iter().any(|item| !f.secret.is_empty() && item.secret == f.secret && item.commit.is_empty()) {
+                        ui.label(RichText::new("Some findings have no commit, so their affected branches could not be identified.").color(Color32::YELLOW));
+                    }
+                }
+                ui.separator(); ui.label(RichText::new("PREPARE REDACTED HISTORY").small().weak()); ui.label("New mirror path"); ui.add_enabled(!busy, egui::TextEdit::singleline(&mut self.destination));
+                ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed. Rewritten history is not automatically verified.").small().weak());
                 if ui.add_enabled(!busy && self.checked.iter().any(|x| *x) && !self.destination.is_empty(), egui::Button::new("Create redacted branches")).clicked() {
-                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<String> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Status(sherlock_git::rewrite(&p, &d, &f, &refs)));
+                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Status(sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)));
                 }
             } else { ui.label(RichText::new("Select a finding to inspect its commit and affected branches.").weak()); }
+            });
         });
+        if let Some(index) = select_related {
+            self.selected = Some(index);
+            self.branches.clear();
+            self.checked.clear();
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
@@ -247,7 +324,26 @@ impl eframe::App for App {
                 ui.label(RichText::new(format!("{}", self.findings.len())).weak());
             });
             ui.label(RichText::new("Review potential secrets before changing history.").weak());
+            if !self.findings.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Classification:");
+                    ui.selectable_value(&mut self.filter, ReviewFilter::All, "All");
+                    ui.selectable_value(&mut self.filter, ReviewFilter::Potential, "Potential secret");
+                    ui.selectable_value(&mut self.filter, ReviewFilter::FalsePositive, "False positive");
+                    ui.selectable_value(&mut self.filter, ReviewFilter::AcceptedRisk, "Accepted risk");
+                });
+                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search rule, path, commit, or scanner"));
+            }
             ui.separator();
+            let visible: Vec<usize> = self.findings.iter().enumerate()
+                .filter(|(_, finding)| finding_matches(finding, self.filter, &self.search))
+                .map(|(i, _)| i).collect();
+            if !self.findings.is_empty() {
+                ui.label(RichText::new(format!("Showing {} of {} findings", visible.len(), self.findings.len())).weak());
+                if self.selected.is_some_and(|index| !visible.contains(&index)) {
+                    ui.label("The selected finding is hidden by the current filters; its details remain open.");
+                }
+            }
             egui::ScrollArea::vertical().show(ui, |ui| {
                 if self.findings.is_empty() {
                     ui.add_space(60.0);
@@ -264,7 +360,11 @@ impl eframe::App for App {
                         }
                     });
                 } else {
-                    for (i, f) in self.findings.iter().enumerate() {
+                    if visible.is_empty() {
+                        ui.label("No findings match these filters.");
+                    }
+                    for i in visible {
+                        let f = &self.findings[i];
                         let text = format!(
                             "{}   ·   {} · {}\n{}:{}   ·   {}",
                             f.rule,
@@ -275,7 +375,7 @@ impl eframe::App for App {
                             f.commit.chars().take(10).collect::<String>()
                         );
                         if ui
-                            .selectable_label(self.selected == Some(i), text)
+                            .add_enabled(!busy, egui::Button::new(text).selected(self.selected == Some(i)))
                             .clicked()
                         {
                             self.selected = Some(i);
@@ -287,5 +387,55 @@ impl eframe::App for App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sherlock_domain::ScannerReport;
+
+    #[test]
+    fn finding_search_respects_classification_and_excludes_secret_values() {
+        let finding = Finding {
+            scanner: "Gitleaks",
+            rule: "Example rule".into(),
+            file: "config/settings.env".into(),
+            commit: "abc123def".into(),
+            line: "7".into(),
+            secret: "synthetic-secret-value".into(),
+            evidence: vec![ScannerReport {
+                scanner: "TruffleHog",
+                rule: "Other rule".into(),
+                raw: Default::default(),
+            }],
+            review: Review::FalsePositive,
+        };
+        for query in [
+            " SETTINGS ",
+            "ABC123",
+            "example",
+            "trufflehog",
+            "other rule",
+        ] {
+            assert!(finding_matches(
+                &finding,
+                ReviewFilter::FalsePositive,
+                query
+            ));
+        }
+        assert!(finding_matches(&finding, ReviewFilter::All, ""));
+        assert!(!finding_matches(
+            &finding,
+            ReviewFilter::Potential,
+            "settings"
+        ));
+        assert!(!finding_matches(&finding, ReviewFilter::AcceptedRisk, ""));
+        assert!(!finding_matches(
+            &finding,
+            ReviewFilter::All,
+            "synthetic-secret-value"
+        ));
+        assert!(!finding_matches(&finding, ReviewFilter::All, "unmatched"));
     }
 }

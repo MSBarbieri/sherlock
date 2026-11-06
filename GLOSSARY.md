@@ -7,6 +7,9 @@ Language for reviewing possible secrets in repository history.
 **Finding**:
 A potential secret at a particular location in repository history, supported by one or more scanner reports.
 
+**Secret workspace**:
+An investigation within a repository that brings together findings for the same detected value and developer-linked related values. Each finding retains its own review decision.
+
 **Scanner report**:
 A scanner's evidence that a location may contain a secret. Multiple reports can support the same finding.
 

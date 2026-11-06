@@ -39,6 +39,25 @@ pub struct Finding {
     pub review: Review,
 }
 
+/// Group occurrences by exact nonempty value for a single repository scan.
+/// Reports without a usable value remain separate, even from each other.
+/// Indices refer to the original findings; the groups do not hold secret values.
+pub fn group_by_secret(findings: &[Finding]) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut values: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (index, finding) in findings.iter().enumerate() {
+        if finding.secret.is_empty() {
+            groups.push(vec![index]);
+        } else if let Some(&group) = values.get(finding.secret.as_str()) {
+            groups[group].push(index);
+        } else {
+            values.insert(finding.secret.as_str(), groups.len());
+            groups.push(vec![index]);
+        }
+    }
+    groups
+}
+
 // Only merge reports with complete, identical identifying fields. Ambiguous reports stay separate.
 pub fn merge_findings(findings: &mut Vec<Finding>, incoming: Vec<Finding>) {
     for mut next in incoming {
@@ -100,5 +119,23 @@ mod tests {
         assert_eq!(findings[0].evidence.len(), 2);
         findings[0].review = Review::AcceptedRisk;
         assert_eq!(findings[0].evidence.len(), 2);
+    }
+
+    #[test]
+    fn groups_exact_values_without_merging_occurrences_or_missing_values() {
+        let mut findings = vec![
+            report("Gitleaks", "2", "example"),
+            report("TruffleHog", "", "example"),
+            report("Gitleaks", "3", "Example"),
+            report("Gitleaks", "4", ""),
+            report("TruffleHog", "", ""),
+        ];
+        findings[1].review = Review::FalsePositive;
+        assert_eq!(
+            group_by_secret(&findings),
+            vec![vec![0, 1], vec![2], vec![3], vec![4]]
+        );
+        assert_eq!(findings[0].review, Review::Unreviewed);
+        assert_eq!(findings[1].review, Review::FalsePositive);
     }
 }
