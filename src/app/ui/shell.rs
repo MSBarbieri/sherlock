@@ -10,7 +10,8 @@ impl App {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("◈  SHERLOCK").color(Color32::from_rgb(160, 143, 255)));
+                ui.add(egui::Image::new(self.logo(ctx, ui.visuals().dark_mode)).fit_to_exact_size(egui::vec2(28.0, 28.0)));
+                ui.heading(RichText::new("SHERLOCK").color(Color32::from_rgb(160, 143, 255)));
                 ui.label(RichText::new("  /  repository security").weak());
                 ui.separator();
                 let project = self.project_root.as_ref().expect("project is open");

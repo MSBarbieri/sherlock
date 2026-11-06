@@ -1,6 +1,10 @@
 # Sherlock
 
+<img src="assets/icons/sherlock-256.png" alt="Sherlock logo" width="128">
+
 Sherlock is a local desktop workspace for reviewing potential repository secrets and preparing redacted Git branches. It uses Rust and egui, with a thin interface over scanner and Git operations.
+
+The app icon appears in the Dock or taskbar, and the in-app logo adapts to light and dark themes. Logo assets in multiple sizes are available in `assets/icons`.
 
 ## Architecture
 

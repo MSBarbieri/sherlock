@@ -26,6 +26,8 @@ use rewrite::{check_exact, scan_prepared, PreparedRewrite};
 use tasks::{load_link_data, ResultMessage};
 
 pub struct App {
+    logo_light: Option<egui::TextureHandle>,
+    logo_dark: Option<egui::TextureHandle>,
     project_root: Option<PathBuf>,
     project_input: String,
     automatic_scan_pending: bool,
@@ -66,6 +68,8 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            logo_light: None,
+            logo_dark: None,
             project_root: None,
             project_input: String::new(),
             automatic_scan_pending: false,
@@ -106,6 +110,29 @@ impl Default for App {
     }
 }
 impl App {
+    fn logo(&mut self, ctx: &egui::Context, dark_mode: bool) -> &egui::TextureHandle {
+        let texture = if dark_mode { &mut self.logo_dark } else { &mut self.logo_light };
+        texture.get_or_insert_with(|| {
+            let mut icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/sherlock-256.png"))
+                .expect("embedded Sherlock logo must be a valid PNG");
+            // The original navy mark has too little contrast against the dark UI.
+            if dark_mode {
+                for pixel in icon.rgba.chunks_exact_mut(4) {
+                    if pixel[0] < 60 && pixel[1] < 80 && pixel[2] < 100 {
+                        pixel[..3].copy_from_slice(&[232, 230, 229]);
+                    }
+                }
+            }
+            ctx.load_texture(
+                if dark_mode { "sherlock-logo-dark" } else { "sherlock-logo-light" },
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        })
+    }
     fn repo(&self) -> PathBuf {
         PathBuf::from(&self.repo)
     }
