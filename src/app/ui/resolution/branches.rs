@@ -1,7 +1,7 @@
 use super::*;
 
 impl App {
-    pub(super) fn render_branch_selection(
+    pub(in crate::app) fn render_branch_selection(
         &mut self,
         ui: &mut egui::Ui,
         f: &Finding,
@@ -245,6 +245,19 @@ impl App {
             self.file_preview = None;
             self.file_comparison = None;
             self.file_reveal = false;
+            let finding = self.findings[index].clone();
+            let repo = self.repo();
+            self.task(move || {
+                ResultMessage::FilePreview(
+                    index,
+                    sherlock_git::preview_file(
+                        &repo,
+                        &finding.commit,
+                        &finding.file,
+                        &finding.secret,
+                    ),
+                )
+            });
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -290,7 +303,7 @@ impl App {
             }
         }
     }
-    fn load_history(&mut self, related: &[usize]) {
+    pub(in crate::app) fn load_history(&mut self, related: &[usize]) {
         let repo = self.repo();
         let occurrences: Vec<Finding> = related.iter().map(|&i| self.findings[i].clone()).collect();
         let finding_indices = related.to_vec();

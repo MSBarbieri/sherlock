@@ -1,3 +1,4 @@
+mod diff;
 mod files;
 mod redaction;
 mod related;
@@ -12,7 +13,7 @@ impl App {
         known_values: &[String],
     ) {
         let mut select_related = None;
-        if self.page == Page::Resolution {
+        if self.page == Page::Resolution && !self.inspection_open {
             egui::SidePanel::left("workspace_list")
                 .resizable(true)
                 .default_width(310.0)
@@ -59,7 +60,11 @@ impl App {
                     });
                 });
         }
-        if self.page == Page::Resolution {
+        if self.page == Page::Resolution && self.inspection_open {
+            self.render_inspection_workspace(ctx, busy, known_values);
+            return;
+        }
+        if self.page == Page::Resolution && !self.inspection_open {
             egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0); ui.heading("Secret resolution"); ui.separator();
             egui::ScrollArea::vertical().id_salt("detail_content").show(ui, |ui| {
@@ -102,7 +107,18 @@ impl App {
                 for report in &f.evidence { ui.label(format!("{} · {}", mask_known_values(report.scanner, &known_values), mask_known_values(&report.rule, &known_values))); }
                 let related = self.linked_groups.iter().find(|group| group.contains(&index)).cloned().unwrap_or_else(|| vec![index]);
                 self.render_related_findings(ui, index, &f, &related, busy, known_values, &mut select_related);
-                self.render_file_inspection(ui, &f, &related, busy, known_values);
+                if ui.add_enabled(!busy, egui::Button::new("Inspect history and file changes")).clicked() {
+                    self.inspection_open = true;
+                    self.file_preview = None;
+                    self.file_comparison = None;
+                    self.file_reveal = false;
+                    let repo = self.repo();
+                    let commit = f.commit.clone();
+                    let file = f.file.clone();
+                    let value = f.secret.clone();
+                    self.status = "Loading historical file…".into();
+                    self.task(move || ResultMessage::FilePreview(index, sherlock_git::preview_file(&repo, &commit, &file, &value)));
+                }
                 if !f.secret.is_empty() {
                     ui.separator();
                     ui.label("Link or unlink another detected value");
@@ -147,8 +163,51 @@ impl App {
             self.file_reveal = false;
             self.completion_output = None;
             self.selected = Some(index);
+            self.inspection_open = false;
             self.branches.clear();
             self.checked.clear();
         }
+    }
+
+    fn render_inspection_workspace(
+        &mut self,
+        ctx: &egui::Context,
+        busy: bool,
+        known_values: &[String],
+    ) {
+        let Some(index) = self.selected else {
+            self.inspection_open = false;
+            return;
+        };
+        let finding = self.findings[index].clone();
+        let related = self
+            .linked_groups
+            .iter()
+            .find(|group| group.contains(&index))
+            .cloned()
+            .unwrap_or_else(|| vec![index]);
+        egui::SidePanel::left("inspection_navigation")
+            .resizable(true)
+            .default_width(340.0)
+            .min_width(240.0)
+            .show(ctx, |ui| {
+                if ui.button("← Finding details").clicked() {
+                    self.inspection_open = false;
+                    self.file_reveal = false;
+                }
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("inspection_navigation_scroll")
+                    .show(ui, |ui| {
+                        self.render_file_tree(ui, &finding, &related, busy, known_values);
+                        ui.separator();
+                        ui.label(RichText::new("HISTORY & BRANCHES").small().strong());
+                        self.render_branch_selection(ui, &finding, &related, busy, known_values);
+                    });
+            });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.add_space(8.0);
+            self.render_file_preview(ui, &finding, &related, busy, known_values);
+        });
     }
 }

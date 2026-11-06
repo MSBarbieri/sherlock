@@ -222,6 +222,17 @@ impl App {
                         ResultMessage::FilePreview(index, result) => {
                             self.file_preview = Some((index, result));
                             self.status = "File inspection ready.".into();
+                            if self.inspection_open && self.history_output.is_none() {
+                                if let Some(selected) = self.selected {
+                                    let related = self
+                                        .linked_groups
+                                        .iter()
+                                        .find(|group| group.contains(&selected))
+                                        .cloned()
+                                        .unwrap_or_else(|| vec![selected]);
+                                    self.load_history(&related);
+                                }
+                            }
                         }
                         ResultMessage::RewrittenHistory(result) => {
                             self.rewritten_history = Some(result);
