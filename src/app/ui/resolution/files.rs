@@ -41,7 +41,13 @@ impl App {
             if let Some((index, result)) = &self.file_preview {
                 let finding = &self.findings[*index];
                 ui.label(format!("Preview · {} @ {}", mask_known_values(&finding.file, known_values), mask_known_values(&finding.commit, known_values)));
-                ui.label("Replacement: [REDACTED] · branch context: reported commit; branch membership is shown in history below.");
+                ui.label(format!("Replacement: {} · branch context: reported commit; branch membership is shown in history below.", mask_known_values("[REDACTED]", known_values)));
+                if known_values.iter().any(|value| !value.is_empty() && "[REDACTED]".contains(value)) {
+                    ui.colored_label(Color32::YELLOW, "The configured replacement contains a known value.");
+                }
+                if self.prepared.is_some() {
+                    ui.label("This remains a proposed preview. Comparison with the actual rewritten commit is not available here.");
+                }
                 match result {
                     Err(error) => { ui.colored_label(Color32::YELLOW, mask_known_values(error, known_values)); }
                     Ok(preview) => {
@@ -52,8 +58,8 @@ impl App {
                         }
                         egui::ScrollArea::both().id_salt("file_preview").max_height(300.0).show(ui, |ui| {
                             for (line_no, line) in preview.original.lines().enumerate() {
-                                let reported = related.iter().any(|&i| self.findings[i].commit == finding.commit && self.findings[i].file == finding.file && self.findings[i].line.parse::<usize>().ok() == Some(line_no + 1));
-                                let suffix = if reported { "  [scanner report]" } else { "  [other exact match]" };
+                                let reported = related.iter().any(|&i| self.findings[i].secret == target.secret && self.findings[i].commit == finding.commit && self.findings[i].file == finding.file && self.findings[i].line.parse::<usize>().ok() == Some(line_no + 1));
+                                let suffix = if reported { "  [reported line; may include other matches]" } else { "  [unreported exact match]" };
                                 if !target.secret.is_empty() && line.contains(&target.secret) {
                                     ui.monospace(format!("- {}{}", mask_known_values(line, known_values), suffix));
                                     ui.monospace(format!("+ {}", mask_known_values(&line.replace(&target.secret, "[REDACTED]"), known_values)));

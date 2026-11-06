@@ -47,10 +47,9 @@ impl App {
             self.task(move || {
                 ResultMessage::History((|| {
                     let mut names = std::collections::BTreeSet::new();
-                    for finding in &occurrences {
-                        if let Ok(refs) = sherlock_git::branches(&repo, &finding.commit) {
-                            names.extend(refs);
-                        }
+                    let placed = sherlock_git::secret_history(&repo, &occurrences, &[])?;
+                    for commit in &placed.commits {
+                        names.extend(sherlock_git::branches(&repo, &commit.commit)?);
                     }
                     let names: Vec<_> = names.into_iter().collect();
                     let history = sherlock_git::secret_history(&repo, &occurrences, &names)?;
@@ -161,12 +160,13 @@ impl App {
             }
         }
         if let Some(index) = navigate {
+            if self.findings[index].secret != f.secret {
+                self.branches.clear();
+                self.checked.clear();
+            }
             self.selected = Some(index);
             self.revealed = None;
             self.file_preview = None;
-            self.branches.clear();
-            self.checked.clear();
-            self.history_output = None;
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
