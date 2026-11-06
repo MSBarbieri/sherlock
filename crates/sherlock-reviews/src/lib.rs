@@ -55,11 +55,18 @@ fn save_review_at(path: &Path, repo: &Path, finding: &Finding) -> Result<(), Str
     } else {
         reviews.insert(key, finding.review.clone());
     }
+    write_reviews(path, &reviews)
+}
+
+fn write_reviews(
+    path: &Path,
+    reviews: &std::collections::HashMap<String, Review>,
+) -> Result<(), String> {
     let dir = path.parent().ok_or("Invalid review file path")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create review directory: {e}"))?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)
         .map_err(|e| format!("Could not create review file: {e}"))?;
-    serde_json::to_writer(&mut tmp, &reviews)
+    serde_json::to_writer(&mut tmp, reviews)
         .map_err(|e| format!("Could not write reviews: {e}"))?;
     tmp.persist(path)
         .map_err(|e| format!("Could not save reviews: {}", e.error))?;
@@ -70,6 +77,12 @@ fn save_review_at(path: &Path, repo: &Path, finding: &Finding) -> Result<(), Str
 /// Concurrent writers are not coordinated; use one store writer per file.
 pub struct ReviewStore {
     path: PathBuf,
+}
+
+/// Indices refer to the supplied slice; each rejected entry explains why it was skipped.
+pub struct BatchSaveResult {
+    pub saved: Vec<usize>,
+    pub rejected: Vec<(usize, String)>,
 }
 
 impl ReviewStore {
@@ -95,6 +108,44 @@ impl ReviewStore {
 
     pub fn save(&self, repo: &Path, finding: &Finding) -> Result<(), String> {
         save_review_at(&self.path, repo, finding)
+    }
+
+    /// Save eligible decisions in one file replacement. An I/O error means no
+    /// decision in this batch was saved; rejected indices can be shown to the user.
+    pub fn save_many(&self, repo: &Path, findings: &[Finding]) -> Result<BatchSaveResult, String> {
+        let mut result = BatchSaveResult {
+            saved: Vec::new(),
+            rejected: Vec::new(),
+        };
+        let mut reviews = read_reviews(&self.path)?;
+        let mut decisions = std::collections::HashMap::<String, Review>::new();
+        for (index, finding) in findings.iter().enumerate() {
+            match review_key(repo, finding) {
+                Ok(key) => {
+                    if decisions
+                        .get(&key)
+                        .is_some_and(|review| review != &finding.review)
+                    {
+                        result
+                            .rejected
+                            .push((index, "Conflicting decisions for the same finding.".into()));
+                        continue;
+                    }
+                    decisions.insert(key.clone(), finding.review.clone());
+                    if finding.review == Review::Unreviewed {
+                        reviews.remove(&key);
+                    } else {
+                        reviews.insert(key, finding.review.clone());
+                    }
+                    result.saved.push(index);
+                }
+                Err(error) => result.rejected.push((index, error)),
+            }
+        }
+        if !result.saved.is_empty() {
+            write_reviews(&self.path, &reviews)?;
+        }
+        Ok(result)
     }
 }
 

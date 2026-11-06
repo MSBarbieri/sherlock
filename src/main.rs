@@ -1,4 +1,5 @@
 mod app;
+mod theme;
 use eframe::egui;
 
 fn main() -> eframe::Result {
@@ -11,7 +12,7 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(app::App::default()))
         }),
     )
