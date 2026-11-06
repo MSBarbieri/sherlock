@@ -1,9 +1,11 @@
 //! Git repository discovery and creation of isolated redacted mirrors.
 mod history;
 mod locations;
+mod observation;
 mod verification;
 pub use history::{secret_history, HistoryCommit, SecretHistory, UnplacedFinding};
 pub use locations::{exact_history_locations, ExactLocation};
+pub use observation::{repository_snapshot, RefState, RepositorySnapshot, WorktreeState};
 pub use verification::{verify_exact_values, VerifiedRef};
 
 use sherlock_domain::Finding;
@@ -28,6 +30,35 @@ fn run(program: &str, args: &[&str], dir: Option<&Path>) -> Result<String, Strin
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Validate and canonicalize the root of a working tree or bare repository.
+/// Subdirectories are rejected because scanners and mirror creation clone the
+/// selected directory, and because review identities use the selected path.
+pub fn open_repository(path: &Path) -> Result<PathBuf, String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot open folder: {e}"))?;
+    if !path.is_dir() {
+        return Err("Choose a repository folder.".into());
+    }
+    run("git", &["rev-parse", "--git-dir"], Some(&path)).map_err(|_| {
+        "This folder is not a Git repository. Choose a repository folder.".to_owned()
+    })?;
+    let bare = run("git", &["rev-parse", "--is-bare-repository"], Some(&path))?;
+    let flag = if bare.trim() == "true" {
+        "--absolute-git-dir"
+    } else {
+        "--show-toplevel"
+    };
+    let root = run("git", &["rev-parse", flag], Some(&path))?;
+    let root = PathBuf::from(root.trim_end_matches(['\r', '\n']))
+        .canonicalize()
+        .map_err(|e| format!("Cannot identify repository root: {e}"))?;
+    if path != root {
+        return Err(format!("Choose the repository root: {}", root.display()));
+    }
+    Ok(path)
 }
 pub fn fetch(repo: &Path) -> Result<String, String> {
     run("git", &["fetch", "--all", "--prune"], Some(repo))?;

@@ -16,3 +16,6 @@ sherlock-reviews = { path = "crates/sherlock-reviews" }
 sherlock-git = { path = "crates/sherlock-git" }
 eframe = "0.31"
 rfd = "0.15"
+
+[dev-dependencies]
+tempfile = "3"

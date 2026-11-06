@@ -3139,6 +3139,7 @@ dependencies = [
  "sherlock-git",
  "sherlock-reviews",
  "sherlock-scan",
+ "tempfile",
 ]
 
 [[package]]
