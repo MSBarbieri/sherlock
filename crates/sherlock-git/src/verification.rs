@@ -27,6 +27,29 @@ pub fn verify_exact_values(
     if run("git", &["rev-parse", "--is-shallow-repository"], Some(repo))?.trim() != "false" {
         return Err("Cannot verify complete history in a shallow repository.".into());
     }
+    // Grafts truncate or alter ancestry even when --no-replace-objects is set.
+    // A successful check over such a graph could otherwise hide older secrets.
+    let graft_path = match std::env::var_os("GIT_GRAFT_FILE") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::path::PathBuf::from(
+            run(
+                "git",
+                &["rev-parse", "--git-path", "info/grafts"],
+                Some(repo),
+            )?
+            .trim(),
+        ),
+    };
+    let graft_path = if graft_path.is_absolute() {
+        graft_path
+    } else {
+        repo.join(graft_path)
+    };
+    match std::fs::metadata(graft_path) {
+        Ok(_) => return Err("Cannot verify complete history with Git grafts configured.".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not inspect Git grafts; verification is incomplete.".into()),
+    }
     let mut cache = BTreeMap::<String, bool>::new();
     let mut results = Vec::new();
     for entry in refs {
@@ -96,4 +119,58 @@ pub fn verify_exact_values(
         });
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_grafts_that_hide_older_commits() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        run("git", &["init", "-q"], Some(repo)).unwrap();
+        run(
+            "git",
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "one",
+            ],
+            Some(repo),
+        )
+        .unwrap();
+        run(
+            "git",
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "two",
+            ],
+            Some(repo),
+        )
+        .unwrap();
+        let tip = run("git", &["rev-parse", "HEAD"], Some(repo))
+            .unwrap()
+            .trim()
+            .to_owned();
+        std::fs::write(repo.join(".git/info/grafts"), &tip).unwrap();
+        let refs = [RefSnapshot {
+            name: "HEAD".into(),
+            tip,
+        }];
+        assert!(verify_exact_values(repo, &refs, &[b"secret"])
+            .unwrap_err()
+            .contains("grafts"));
+    }
 }

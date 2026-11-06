@@ -141,3 +141,5 @@ mod tests {
         assert!(ReviewStore::at(&path).save(tmp.path(), &finding).is_err());
     }
 }
+
+pub mod links;

@@ -1,5 +1,7 @@
 //! Git repository discovery and creation of isolated redacted mirrors.
+mod history;
 mod verification;
+pub use history::{secret_history, HistoryCommit, SecretHistory, UnplacedFinding};
 pub use verification::{verify_exact_values, VerifiedRef};
 
 use sherlock_domain::Finding;

@@ -49,14 +49,122 @@ enum Page {
 struct PreparedRewrite {
     source: PathBuf,
     destination: PathBuf,
+    source_refs: Vec<String>,
+    excluded_refs: Vec<String>,
+    has_unplaced_findings: bool,
     refs: Vec<sherlock_git::RefSnapshot>,
     value: String,
 }
 
+fn check_exact(prepared: &PreparedRewrite) -> Result<String, String> {
+    let results = sherlock_git::verify_exact_values(
+        &prepared.destination,
+        &prepared.refs,
+        &[prepared.value.as_bytes()],
+    )?;
+    let mut output =
+        String::from("Exact-value check of reachable file blobs (not a scanner or a guarantee):\n");
+    for result in results {
+        let outcome = if result.matching_blobs.is_empty() {
+            "not found".to_owned()
+        } else {
+            format!("found in {} blob(s)", result.matching_blobs.len())
+        };
+        output.push_str(&format!(
+            "{} @ {}: {} commits checked; {}\n",
+            result.name, result.tip, result.commits_checked, outcome
+        ));
+    }
+    Ok(output)
+}
+
+fn scan_prepared(
+    prepared: &PreparedRewrite,
+    scanner: Scanner,
+) -> Result<(String, Vec<Finding>), String> {
+    let mut output = format!(
+        "{} results (scanner coverage is limited):\n",
+        scanner.label()
+    );
+    let mut findings = Vec::new();
+    for entry in &prepared.refs {
+        let branch = entry
+            .name
+            .strip_prefix("refs/heads/")
+            .ok_or("Invalid output branch name")?;
+        let report = sherlock_scan::scan_branch(&prepared.destination, branch, scanner)?;
+        if report.tip != entry.tip {
+            return Err(format!(
+                "{} changed since rewrite; its scan results do not describe the recorded output.",
+                entry.name
+            ));
+        }
+        let exact = report
+            .findings
+            .iter()
+            .filter(|finding| finding.secret == prepared.value)
+            .count();
+        output.push_str(&format!(
+            "{} @ {}: {} finding(s), {} with the same exact value\n",
+            entry.name,
+            entry.tip,
+            report.findings.len(),
+            exact
+        ));
+        for finding in &report.findings {
+            let clean = |text: &str| {
+                let masked = if prepared.value.is_empty() {
+                    text.to_owned()
+                } else {
+                    text.replace(&prepared.value, "[MASKED]")
+                };
+                if finding.secret.is_empty() {
+                    masked
+                } else {
+                    masked.replace(&finding.secret, "[MASKED]")
+                }
+            };
+            output.push_str(&format!(
+                "  {} · {} · {}:{} · commit {}{}\n",
+                clean(finding.scanner),
+                clean(&finding.rule),
+                clean(&finding.file),
+                clean(&finding.line),
+                clean(&finding.commit),
+                if finding.secret == prepared.value {
+                    " · same value"
+                } else {
+                    ""
+                }
+            ));
+        }
+        sherlock_domain::merge_findings(&mut findings, report.findings);
+    }
+    Ok((output, findings))
+}
+
+type LinkData = (Vec<Vec<usize>>, Vec<sherlock_reviews::links::LinkEdge>);
+fn load_link_data(
+    store: &sherlock_reviews::links::LinkStore,
+    repo: &std::path::Path,
+    values: &[String],
+) -> Result<LinkData, String> {
+    let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+    Ok((store.groups(repo, &refs)?, store.edges(repo, &refs)?))
+}
 enum ResultMessage {
     Rewrite(Result<(PreparedRewrite, String), String>),
+    AutoChecks(
+        Scanner,
+        Result<(), String>,
+        Result<String, String>,
+        Result<(String, Vec<Finding>), String>,
+    ),
     Verification(Result<String, String>),
-    ScannerCheck(Result<String, String>),
+    ScannerCheck(Scanner, Result<(String, Vec<Finding>), String>),
+    Completion(Result<Option<sherlock_reviews::links::CompletionRecord>, String>),
+    History(Result<String, String>),
+    LinkGroups(Result<LinkData, String>),
     Scan(Result<Vec<Finding>, String>),
     Branches(Result<Vec<sherlock_git::RefSnapshot>, String>),
     Status(Result<String, String>),
@@ -66,6 +174,14 @@ pub struct App {
     prepared: Option<PreparedRewrite>,
     verification_output: Option<String>,
     scanner_output: Option<String>,
+    scanner_used: Option<Scanner>,
+    completion_output: Option<String>,
+    scanner_findings: Vec<Finding>,
+    history_output: Option<String>,
+    linked_groups: Vec<Vec<usize>>,
+    saved_links: Vec<sherlock_reviews::links::LinkEdge>,
+    link_candidate: Option<usize>,
+    link_repo: Option<PathBuf>,
     repo: String,
     scanner: Scanner,
     findings: Vec<Finding>,
@@ -86,8 +202,16 @@ impl Default for App {
             prepared: None,
             verification_output: None,
             scanner_output: None,
+            scanner_used: None,
+            completion_output: None,
+            scanner_findings: Vec::new(),
+            history_output: None,
+            linked_groups: Vec::new(),
+            saved_links: Vec::new(),
+            link_candidate: None,
+            link_repo: None,
             repo: String::new(),
-            scanner: Scanner::Gitleaks,
+            scanner: Scanner::Both,
             findings: vec![],
             selected: None,
             branches: vec![],
@@ -131,6 +255,21 @@ impl eframe::App for App {
                             };
                             self.scan_completed = true;
                             self.findings = f;
+                            self.linked_groups = group_by_secret(&self.findings);
+                            self.link_candidate = None;
+                            let repo = self.link_repo.clone().unwrap_or_else(|| self.repo());
+                            self.link_repo = Some(repo.clone());
+                            let values: Vec<String> = self
+                                .findings
+                                .iter()
+                                .map(|finding| finding.secret.clone())
+                                .collect();
+                            self.task(move || {
+                                ResultMessage::LinkGroups(
+                                    sherlock_reviews::links::LinkStore::standard()
+                                        .and_then(|store| load_link_data(&store, &repo, &values)),
+                                )
+                            });
                             self.selected = None;
                             self.branches.clear();
                             self.checked.clear();
@@ -141,8 +280,21 @@ impl eframe::App for App {
                             self.branches = b;
                         }
                         ResultMessage::Rewrite(Ok((prepared, status))) => {
-                            self.prepared = Some(prepared);
-                            self.status = status;
+                            self.prepared = Some(prepared.clone());
+                            self.status = format!("{status}\nChecking rewritten branches…");
+                            let scanner = self.scanner;
+                            self.task(move || {
+                                let registration = sherlock_reviews::links::LinkStore::standard()
+                                    .and_then(|store| {
+                                        store.register_mirror(
+                                            &prepared.source,
+                                            &prepared.destination,
+                                        )
+                                    });
+                                let exact = check_exact(&prepared);
+                                let scanned = scan_prepared(&prepared, scanner);
+                                ResultMessage::AutoChecks(scanner, registration, exact, scanned)
+                            });
                         }
                         ResultMessage::Verification(Ok(result)) => {
                             self.verification_output = Some(result);
@@ -153,12 +305,74 @@ impl eframe::App for App {
                             self.verification_output = Some(format!("Check incomplete: {e}"));
                             self.status = "Exact-value check failed.".into();
                         }
-                        ResultMessage::ScannerCheck(Ok(result)) => {
+                        ResultMessage::AutoChecks(scanner, registration, exact, scanned) => {
+                            self.verification_output = Some(match exact {
+                                Ok(result) => result,
+                                Err(e) => format!("Exact-value check incomplete: {e}"),
+                            });
+                            match scanned {
+                                Ok((result, findings)) => {
+                                    self.scanner_output = Some(result);
+                                    self.scanner_used = Some(scanner);
+                                    self.scanner_findings = findings;
+                                }
+                                Err(e) => {
+                                    self.scanner_output =
+                                        Some(format!("Scanner check incomplete: {e}"));
+                                    self.scanner_findings.clear();
+                                    self.scanner_used = None;
+                                }
+                            }
+                            self.status = match registration {
+                                Ok(()) => "Rewrite checks finished. Review each result and its coverage.".into(),
+                                Err(error) => format!("Rewrite checks finished, but this mirror could not be linked to its original workspace: {error}. In this session links remain available; reopening the mirror may not restore them."),
+                            };
+                        }
+                        ResultMessage::Completion(result) => {
+                            self.completion_output = Some(match result {
+                                Ok(Some(record)) => {
+                                    let mut text = format!("Previously marked complete by a developer. This is historical and does not indicate current cleanliness or freshness.\nScanners: {}\n{}\n", record.scanners.join(", "), record.checks_summary);
+                                    for tip in record.output_tips {
+                                        text.push_str(&format!(
+                                            "{} @ {}\n",
+                                            tip.reference, tip.commit
+                                        ));
+                                    }
+                                    text
+                                }
+                                Ok(None) => {
+                                    "No previous completion record for this workspace.".into()
+                                }
+                                Err(e) => format!("Could not access completion record: {e}"),
+                            });
+                        }
+                        ResultMessage::LinkGroups(Ok((groups, edges))) => {
+                            self.linked_groups = groups;
+                            self.saved_links = edges;
+                            self.history_output = None;
+                            self.completion_output = None;
+                            self.status = "Secret links loaded.".into();
+                        }
+                        ResultMessage::LinkGroups(Err(e)) => {
+                            self.status = format!("Could not load secret links: {e}");
+                        }
+                        ResultMessage::History(Ok(result)) => {
+                            self.history_output = Some(result);
+                            self.status = "Occurrence history ready.".into();
+                        }
+                        ResultMessage::History(Err(e)) => {
+                            self.history_output = Some(format!("History incomplete: {e}"));
+                            self.status = "Could not load occurrence history.".into();
+                        }
+                        ResultMessage::ScannerCheck(scanner, Ok((result, findings))) => {
+                            self.scanner_findings = findings;
+                            self.scanner_used = Some(scanner);
                             self.scanner_output = Some(result);
                             self.status =
                                 "Scanner check complete. Review the results below.".into();
                         }
-                        ResultMessage::ScannerCheck(Err(e)) => {
+                        ResultMessage::ScannerCheck(_, Err(e)) => {
+                            self.scanner_used = None;
                             self.scanner_output = Some(format!("Scanner check incomplete: {e}"));
                             self.status = "Scanner check failed.".into();
                         }
@@ -221,6 +435,8 @@ impl eframe::App for App {
                         .changed()
                     {
                         self.scan_completed = false;
+                        self.link_repo = None;
+                        self.saved_links.clear();
                         self.findings.clear();
                         self.selected = None;
                         self.branches.clear();
@@ -235,6 +451,8 @@ impl eframe::App for App {
                     {
                         if let Some(p) = rfd::FileDialog::new().pick_folder() {
                             self.scan_completed = false;
+                            self.link_repo = None;
+                            self.saved_links.clear();
                             self.repo = p.display().to_string();
                             self.destination = sherlock_git::suggested_destination(&p)
                                 .display()
@@ -299,6 +517,26 @@ impl eframe::App for App {
                         self.status = "Fetching remotes…".into();
                         self.task(move || ResultMessage::Status(sherlock_git::fetch(&p)));
                     }
+                    if !self.saved_links.is_empty() {
+                        ui.separator(); ui.label("Saved value links");
+                        ui.label(RichText::new("Opaque IDs do not reveal values. Not reported means absent from current scan results, not necessarily from history.").small().weak());
+                        egui::ScrollArea::vertical().id_salt("saved_links").max_height(150.0).show(ui, |ui| {
+                        for edge in self.saved_links.clone() {
+                            let left = format!("{} ({})", &edge.left.id[..12], if edge.left.present { "reported" } else { "not reported" });
+                            let right = format!("{} ({})", &edge.right.id[..12], if edge.right.present { "reported" } else { "not reported" });
+                            ui.label(format!("{left} ↔ {right}"));
+                            if ui.add_enabled(!busy, egui::Button::new("Remove this link")).clicked() {
+                                let repo = self.link_repo.clone().unwrap_or_else(|| self.repo());
+                                let values: Vec<String> = self.findings.iter().map(|finding| finding.secret.clone()).collect();
+                                self.status = "Removing secret link…".into();
+                                self.task(move || ResultMessage::LinkGroups(sherlock_reviews::links::LinkStore::standard().and_then(|store| {
+                                    store.unlink_ids(&repo, &edge.left.id, &edge.right.id)?;
+                                    load_link_data(&store, &repo, &values)
+                                })));
+                            }
+                        }
+                        });
+                    }
                     ui.add_space(16.0);
                     ui.label(
                     RichText::new(
@@ -336,16 +574,16 @@ impl eframe::App for App {
                 ui.label(RichText::new("Review decisions are stored locally for this repository.").small().weak());
                 ui.label("Scanner evidence:");
                 for report in &f.evidence { ui.label(format!("{} · {}", report.scanner, report.rule)); }
-                let related = group_by_secret(&self.findings).into_iter().find(|group| group.contains(&index)).unwrap_or_default();
+                let related = self.linked_groups.iter().find(|group| group.contains(&index)).cloned().unwrap_or_else(|| vec![index]);
                 ui.separator();
-                ui.label(RichText::new("SAME DETECTED VALUE").small().weak());
+                ui.label(RichText::new("RELATED FINDINGS").small().weak());
                 if f.secret.is_empty() {
                     ui.label("No usable value was reported; this finding is kept separate.");
                 } else {
                     ui.label(format!("{} finding(s) in this scan", related.len()));
-                    ui.label(RichText::new("Each finding keeps its own classification. This grouping is based on the exact value.").small().weak());
+                    ui.label(RichText::new("Exact values are grouped automatically; linked variants are distinct. Classification and redaction apply to each selected finding or value.").small().weak());
                     egui::ScrollArea::vertical().id_salt("related_findings").max_height(100.0).show(ui, |ui| {
-                        for related_index in related {
+                        for related_index in related.iter().copied() {
                             let item = &self.findings[related_index];
                             let location = format!("{}:{} · {} · {}", if item.file.is_empty() { "Unknown file" } else { &item.file }, if item.line.is_empty() { "?" } else { &item.line }, if item.commit.is_empty() { "Unknown commit".to_owned() } else { item.commit.chars().take(10).collect() }, item.review.label());
                             if ui.add_enabled(!busy && related_index != index, egui::Button::new(location)).clicked() {
@@ -354,8 +592,65 @@ impl eframe::App for App {
                         }
                     });
                 }
-                if ui.add_enabled(!busy, egui::Button::new("Find branches for this value")).clicked() { let p = self.repo(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); self.branches.clear(); self.checked.clear(); self.status = "Checking local and remote-tracking refs…".into(); self.task(move || ResultMessage::Branches(sherlock_git::branches_for_findings(&p, &occurrences).and_then(|refs| sherlock_git::snapshot_refs(&p, &refs)))); }
-                ui.add_space(8.0); ui.label(RichText::new("CONTAINING REFS").small().weak());
+                if !f.secret.is_empty() {
+                    ui.separator();
+                    ui.label("Link or unlink another detected value");
+                    let candidates: Vec<usize> = self.findings.iter().enumerate().filter(|(_, candidate)| !candidate.secret.is_empty() && candidate.secret != f.secret).map(|(i, _)| i).collect();
+                    if self.link_candidate.is_some_and(|candidate| !candidates.contains(&candidate)) { self.link_candidate = None; }
+                    let candidate_label = self.link_candidate.map(|i| format!("{}:{} · {}", self.findings[i].file, self.findings[i].line, self.findings[i].rule)).unwrap_or_else(|| "Select another finding".into());
+                    ui.add_enabled_ui(!busy, |ui| { egui::ComboBox::from_id_salt("link_candidate").selected_text(candidate_label).show_ui(ui, |ui| {
+                        for &i in &candidates { let item = &self.findings[i]; ui.selectable_value(&mut self.link_candidate, Some(i), format!("{}:{} · {}", item.file, item.line, item.rule)); }
+                    }); });
+                    ui.label(RichText::new("Links persist locally using the system credential store. Unlink removes the direct link; other links may still connect the values.").small().weak());
+                    ui.horizontal(|ui| { for (label, linked) in [("Link values", true), ("Unlink values", false)] {
+                        if ui.add_enabled(!busy && self.link_candidate.is_some(), egui::Button::new(label)).clicked() {
+                            let repo = self.link_repo.clone().unwrap_or_else(|| self.repo()); let candidate = self.link_candidate.unwrap(); let a = f.secret.clone(); let b = self.findings[candidate].secret.clone();
+                            let values: Vec<String> = self.findings.iter().map(|finding| finding.secret.clone()).collect();
+                            self.status = "Saving secret links…".into();
+                            self.task(move || ResultMessage::LinkGroups(sherlock_reviews::links::LinkStore::standard().and_then(|store| {
+                                store.set_link(&repo, &a, &b, linked)?;
+                                load_link_data(&store, &repo, &values)
+                            })));
+                        }
+                    }});
+                }
+                if !f.secret.is_empty() {
+                    ui.separator();
+                    if ui.add_enabled(!busy, egui::Button::new("View previous completion")).clicked() {
+                        let repo = self.link_repo.clone().unwrap_or_else(|| self.repo()); let value = f.secret.clone();
+                        self.completion_output = None;
+                        self.task(move || ResultMessage::Completion(sherlock_reviews::links::LinkStore::standard().and_then(|store| store.previously_completed(&repo, &value))));
+                    }
+                    if let Some(record) = &self.completion_output { ui.label(record); }
+                }
+                if ui.add_enabled(!busy, egui::Button::new("Find branches for this value")).clicked() { let p = self.repo(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); self.branches.clear(); self.checked.clear(); self.history_output = None; self.status = "Checking local and remote-tracking refs…".into(); self.task(move || ResultMessage::Branches(sherlock_git::branches_for_findings(&p, &occurrences).and_then(|refs| sherlock_git::snapshot_refs(&p, &refs)))); }
+                if ui.add_enabled(!busy && !f.secret.is_empty(), egui::Button::new("Show related commit history")).clicked() {
+                    let repo = self.repo();
+                    let occurrences: Vec<Finding> = related.iter().map(|&i| self.findings[i].clone()).collect();
+                    self.history_output = None; self.status = "Loading reported commit history…".into();
+                    self.task(move || ResultMessage::History((|| {
+                        let names = sherlock_git::branches_for_findings(&repo, &occurrences)?;
+                        let history = sherlock_git::secret_history(&repo, &occurrences, &names)?;
+                        let mut variants: Vec<&str> = Vec::new();
+                        for occurrence in &occurrences { if !variants.contains(&occurrence.secret.as_str()) { variants.push(&occurrence.secret); } }
+                        let mut text = String::from("Scanner-reported commits across linked values (descendants before ancestors; moves and disappearances are not inferred):\n");
+                        for commit in history.commits {
+                            text.push_str(&format!("{}\n", commit.commit));
+                            for i in commit.finding_indices {
+                                let occurrence = &occurrences[i];
+                                let variant = variants.iter().position(|v| *v == occurrence.secret).unwrap_or(0) + 1;
+                                let mut location = format!("{}:{}", occurrence.file, occurrence.line);
+                                for value in &variants { if !value.is_empty() { location = location.replace(value, "[MASKED]"); } }
+                                text.push_str(&format!("  Value {variant} · {location}\n"));
+                            }
+                            for name in commit.containing_refs { text.push_str(&format!("  {name}\n")); }
+                        }
+                        if !history.unplaced.is_empty() { text.push_str(&format!("{} finding(s) could not be placed in history.\n", history.unplaced.len())); }
+                        Ok(text)
+                    })()));
+                }
+                if let Some(history) = &self.history_output { ui.label(history); }
+                ui.add_space(8.0); ui.label(RichText::new("CONTAINING REFS FOR SELECTED VALUE").small().weak());
                 egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| { for (i, branch) in self.branches.iter().enumerate() { ui.add_enabled(!busy, egui::Checkbox::new(&mut self.checked[i], &branch.name)); } });
                 if !self.branches.is_empty() {
                     let selected_count = self.checked.iter().filter(|checked| **checked).count();
@@ -369,52 +664,85 @@ impl eframe::App for App {
                     }
                 }
                 ui.separator(); ui.label(RichText::new("PREPARE REDACTED HISTORY").small().weak()); ui.label("New mirror path"); ui.add_enabled(!busy, egui::TextEdit::singleline(&mut self.destination));
-                ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed. Rewritten history is not automatically verified.").small().weak());
+                ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed. Exact-value and scanner checks run after rewriting; review their coverage and results.").small().weak());
                 if ui.add_enabled(!busy && self.checked.iter().any(|x| *x) && !self.destination.is_empty(), egui::Button::new("Create redacted branches")).clicked() {
-                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); let value = f.secret.clone(); self.prepared = None; self.verification_output = None; self.scanner_output = None; self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Rewrite((|| { let status = sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)?; let names: Vec<String> = (1..=refs.len()).map(|i| format!("refs/heads/sherlock/redacted-{i}")).collect(); let output_refs = sherlock_git::snapshot_refs(&d, &names).map_err(|e| format!("Rewrite finished in {}, but output refs could not be recorded: {e}", d.display()))?; Ok((PreparedRewrite { source: p, destination: d, refs: output_refs, value }, status)) })()));
+                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let excluded_refs: Vec<String> = self.branches.iter().zip(&self.checked).filter(|(_, checked)| !**checked).map(|(branch, _)| branch.name.clone()).collect(); let has_unplaced_findings = self.findings.iter().any(|item| !f.secret.is_empty() && item.secret == f.secret && item.commit.is_empty()); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); let value = f.secret.clone(); self.prepared = None; self.verification_output = None; self.scanner_output = None; self.scanner_findings.clear(); self.scanner_used = None; self.completion_output = None; self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Rewrite((|| { let status = sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)?; let names: Vec<String> = (1..=refs.len()).map(|i| format!("refs/heads/sherlock/redacted-{i}")).collect(); let output_refs = sherlock_git::snapshot_refs(&d, &names).map_err(|e| format!("Rewrite finished in {}, but output refs could not be recorded: {e}", d.display()))?; Ok((PreparedRewrite { source: p, destination: d, source_refs: refs.iter().map(|entry| entry.name.clone()).collect(), excluded_refs, has_unplaced_findings, refs: output_refs, value }, status)) })()));
                 }
                 if let Some(prepared) = self.prepared.clone().filter(|prepared| prepared.source == self.repo() && prepared.value == f.secret) {
                     ui.separator();
                     ui.heading("Check rewritten history");
                     ui.label(format!("Mirror: {}", prepared.destination.display()));
+                    for (source, output) in prepared.source_refs.iter().zip(&prepared.refs) {
+                        ui.label(format!("{source} → {}", output.name));
+                    }
                     ui.label("Checks the exact detected value in file blobs at the recorded output tips, including binary files. Does not scan commit messages, LFS payloads, submodules, or other refs.");
                     if ui.add_enabled(!busy, egui::Button::new("Check exact value in rewritten branches")).clicked() {
-                        let path = prepared.destination.clone(); let refs = prepared.refs.clone(); let value = prepared.value.clone();
+                        let prepared = prepared.clone();
                         self.status = "Checking rewritten history…".into(); self.verification_output = None;
-                        self.task(move || ResultMessage::Verification(sherlock_git::verify_exact_values(&path, &refs, &[value.as_bytes()]).map(|results| {
-                            let mut output = String::from("Exact-value check of reachable file blobs (not a scanner or a guarantee):\n");
-                            for result in results {
-                                let outcome = if result.matching_blobs.is_empty() { "not found".to_owned() } else { format!("found in {} blob(s)", result.matching_blobs.len()) };
-                                output.push_str(&format!("{} @ {}: {} commits checked; {}\n", result.name, result.tip, result.commits_checked, outcome));
-                            }
-                            output
-                        })));
+                        self.task(move || ResultMessage::Verification(check_exact(&prepared)));
                     }
                     if let Some(result) = &self.verification_output { ui.separator(); ui.label(result); }
                     ui.separator();
-                    ui.label(format!("Scan output branches with {}. Scanner coverage is limited; no findings does not guarantee that the history is clean.", self.scanner.label()));
+                    ui.add_enabled_ui(!busy, |ui| {
+                        egui::ComboBox::from_id_salt("verification_scanner")
+                            .selected_text(self.scanner.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.scanner, Scanner::Both, "Both scanners");
+                                ui.selectable_value(&mut self.scanner, Scanner::Gitleaks, "Gitleaks");
+                                ui.selectable_value(&mut self.scanner, Scanner::TruffleHog, "TruffleHog");
+                            });
+                    });
+                    ui.label("Scanner coverage is limited; no findings does not guarantee that the history is clean.");
                     if ui.add_enabled(!busy, egui::Button::new("Scan rewritten branches")).clicked() {
-                        let path = prepared.destination.clone(); let refs = prepared.refs.clone(); let value = prepared.value.clone(); let scanner = self.scanner;
-                        self.scanner_output = None; self.status = "Scanning rewritten branches…".into();
-                        self.task(move || ResultMessage::ScannerCheck((|| {
-                            let mut output = format!("{} results (scanner coverage is limited):\n", scanner.label());
-                            for entry in refs {
-                                let branch = entry.name.strip_prefix("refs/heads/").ok_or("Invalid output branch name")?;
-                                let report = sherlock_scan::scan_branch(&path, branch, scanner)?;
-                                if report.tip != entry.tip { return Err(format!("{} changed since rewrite; its scan results do not describe the recorded output.", entry.name)); }
-                                let exact = report.findings.iter().filter(|finding| finding.secret == value).count();
-                                output.push_str(&format!("{} @ {}: {} finding(s), {} with the same exact value\n", entry.name, entry.tip, report.findings.len(), exact));
-                            }
-                            Ok(output)
-                        })()));
+                        let prepared = prepared.clone(); let scanner = self.scanner;
+                        self.scanner_output = None; self.scanner_findings.clear(); self.status = "Scanning rewritten branches…".into();
+                        self.task(move || ResultMessage::ScannerCheck(scanner, scan_prepared(&prepared, scanner)));
                     }
                     if let Some(result) = &self.scanner_output { ui.separator(); ui.label(result); }
+                    let exact_ok = self.verification_output.as_ref().is_some_and(|output| output.starts_with("Exact-value check of reachable file blobs"));
+                    if ui.add_enabled(!busy && exact_ok && self.scanner_used.is_some(), egui::Button::new("Mark this workspace completed")).clicked() {
+                        let repo = self.link_repo.clone().unwrap_or_else(|| self.repo()); let value = prepared.value.clone();
+                        let scanner = self.scanner_used.unwrap();
+                        let exact_summary = self.verification_output.clone().unwrap_or_default();
+                        let exact_matches = self.scanner_findings.iter().filter(|finding| finding.secret == value).count();
+                        let known_values: Vec<String> = self.findings.iter().chain(self.scanner_findings.iter()).filter(|finding| !finding.secret.is_empty()).map(|finding| finding.secret.clone()).collect();
+                        let sanitize = |text: &str| { let mut output = text.to_owned(); for value in &known_values { output = output.replace(value, "[MASKED]"); } output };
+                        let mapping = prepared.source_refs.iter().zip(&prepared.refs).map(|(source, output)| format!("{} → {}", sanitize(source), output.name)).collect::<Vec<_>>().join(", ");
+                        let excluded = prepared.excluded_refs.iter().map(|name| sanitize(name)).collect::<Vec<_>>().join(", ");
+                        let record = sherlock_reviews::links::CompletionRecord {
+                            output_tips: prepared.refs.iter().map(|entry| sherlock_reviews::links::CompletionTip { reference: entry.name.clone(), commit: entry.tip.clone() }).collect(),
+                            scanners: vec![scanner.label().into()],
+                            checks_summary: format!("Mirror: {}\nSource to output: {mapping}\nExcluded known refs: {}\nUnplaced findings: {}\n{}Scanner: {} distinct finding(s), {exact_matches} with the selected exact value. Only this value received the exact check; linked variants were not covered. Scanner coverage is limited.", sanitize(&prepared.destination.display().to_string()), if excluded.is_empty() { "none" } else { &excluded }, if prepared.has_unplaced_findings { "yes" } else { "none known" }, sanitize(&exact_summary), self.scanner_findings.len()),
+                        };
+                        self.completion_output = None;
+                        self.task(move || ResultMessage::Completion(sherlock_reviews::links::LinkStore::standard().and_then(|store| { store.set_completion(&repo, &value, Some(&record))?; store.previously_completed(&repo, &value) })));
+                    }
+                    ui.label(RichText::new("Completion is a developer decision for these output tips. The exact check covers only the selected value, not other linked variants. It does not assert current or global cleanliness.").small().weak());
+                    if !self.scanner_findings.is_empty() {
+                        ui.label("Continue with the scanner findings in the new mirror. Its original refs are still sensitive; select branches carefully.");
+                        if ui.add_enabled(!busy, egui::Button::new("Review findings in the mirror →")).clicked() {
+                            self.repo = prepared.destination.display().to_string();
+                            self.destination = sherlock_git::suggested_destination(&prepared.destination).display().to_string();
+                            self.findings = std::mem::take(&mut self.scanner_findings);
+                            self.linked_groups = group_by_secret(&self.findings); self.link_candidate = None;
+                            self.selected = None; self.branches.clear(); self.checked.clear(); self.history_output = None;
+                            self.scan_completed = true; self.page = Page::Discovery;
+                            self.status = "Reviewing scanner findings from the rewritten branches. Original refs in this mirror remain sensitive.".into();
+                            let repo = self.link_repo.clone().unwrap_or_else(|| self.repo());
+                            let values: Vec<String> = self.findings.iter().map(|finding| finding.secret.clone()).collect();
+                            self.task(move || ResultMessage::LinkGroups(sherlock_reviews::links::LinkStore::standard().and_then(|store| {
+                                load_link_data(&store, &repo, &values)
+                            })));
+                        }
+                    }
                 }
             } else { ui.label(RichText::new("Select a finding to inspect its commit and affected branches.").weak()); }
             });
         });
         }
         if let Some(index) = select_related {
+            self.history_output = None;
+            self.completion_output = None;
             self.selected = Some(index);
             self.branches.clear();
             self.checked.clear();
@@ -484,6 +812,8 @@ impl eframe::App for App {
                             .add_enabled(!busy, egui::Button::new(text).selected(self.selected == Some(i)))
                             .clicked()
                         {
+                            self.history_output = None;
+                            self.completion_output = None;
                             self.selected = Some(i);
                             self.branches.clear();
                             self.checked.clear();
