@@ -25,17 +25,31 @@ impl ReviewFilter {
     }
 }
 
+fn mask_detected_value(text: &str, value: &str) -> String {
+    if value.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(value, "[MASKED]")
+    }
+}
+
 fn finding_matches(finding: &Finding, filter: ReviewFilter, search: &str) -> bool {
     let query = search.trim().to_lowercase();
     filter.matches(&finding.review)
         && (query.is_empty()
             || [&finding.rule, &finding.file, &finding.commit]
                 .iter()
-                .any(|value| value.to_lowercase().contains(&query))
+                .any(|value| {
+                    mask_detected_value(value, &finding.secret)
+                        .to_lowercase()
+                        .contains(&query)
+                })
             || finding.scanner.to_lowercase().contains(&query)
             || finding.evidence.iter().any(|report| {
                 report.scanner.to_lowercase().contains(&query)
-                    || report.rule.to_lowercase().contains(&query)
+                    || mask_detected_value(&report.rule, &finding.secret)
+                        .to_lowercase()
+                        .contains(&query)
             }))
 }
 
@@ -161,6 +175,7 @@ enum ResultMessage {
         Result<(String, Vec<Finding>), String>,
     ),
     Verification(Result<String, String>),
+    ExactLocations(Result<Vec<sherlock_git::ExactLocation>, String>),
     ScannerCheck(Scanner, Result<(String, Vec<Finding>), String>),
     Completion(Result<Option<sherlock_reviews::links::CompletionRecord>, String>),
     History(Result<String, String>),
@@ -173,6 +188,8 @@ pub struct App {
     page: Page,
     prepared: Option<PreparedRewrite>,
     verification_output: Option<String>,
+    exact_locations: Vec<sherlock_git::ExactLocation>,
+    exact_location_error: Option<String>,
     scanner_output: Option<String>,
     scanner_used: Option<Scanner>,
     completion_output: Option<String>,
@@ -201,6 +218,8 @@ impl Default for App {
             page: Page::Discovery,
             prepared: None,
             verification_output: None,
+            exact_locations: Vec::new(),
+            exact_location_error: None,
             scanner_output: None,
             scanner_used: None,
             completion_output: None,
@@ -295,6 +314,19 @@ impl eframe::App for App {
                                 let scanned = scan_prepared(&prepared, scanner);
                                 ResultMessage::AutoChecks(scanner, registration, exact, scanned)
                             });
+                        }
+                        ResultMessage::ExactLocations(Ok(locations)) => {
+                            self.exact_locations = locations;
+                            self.exact_location_error = None;
+                            self.status = format!(
+                                "Located {} exact-value occurrence snapshot(s).",
+                                self.exact_locations.len()
+                            );
+                        }
+                        ResultMessage::ExactLocations(Err(error)) => {
+                            self.exact_locations.clear();
+                            self.exact_location_error = Some(error);
+                            self.status = "Exact-value location search incomplete.".into();
                         }
                         ResultMessage::Verification(Ok(result)) => {
                             self.verification_output = Some(result);
@@ -553,7 +585,7 @@ impl eframe::App for App {
             ui.add_space(12.0); ui.heading("Secret resolution"); ui.separator();
             egui::ScrollArea::vertical().id_salt("detail_content").show(ui, |ui| {
             if let Some(index) = self.selected { let f = self.findings[index].clone();
-                ui.label(RichText::new(&f.rule).strong().color(Color32::from_rgb(197, 184, 255))); ui.label(format!("{} · line {}", f.file, f.line)); ui.label(format!("Commit  {}", f.commit)); ui.label("Secret  ••••••••••••"); ui.add_space(12.0);
+                ui.label(RichText::new(mask_detected_value(&f.rule, &f.secret)).strong().color(Color32::from_rgb(197, 184, 255))); ui.label(format!("{} · line {}", mask_detected_value(&f.file, &f.secret), f.line)); ui.label(format!("Commit  {}", f.commit)); ui.label("Secret  ••••••••••••"); ui.add_space(12.0);
                 ui.label(format!("Classification: {}", f.review.label()));
                 ui.label(RichText::new("Scanner reports are potential secrets; online verification is disabled.").small().weak());
                 let previous_review = self.findings[index].review.clone();
@@ -573,7 +605,7 @@ impl eframe::App for App {
                 }
                 ui.label(RichText::new("Review decisions are stored locally for this repository.").small().weak());
                 ui.label("Scanner evidence:");
-                for report in &f.evidence { ui.label(format!("{} · {}", report.scanner, report.rule)); }
+                for report in &f.evidence { ui.label(format!("{} · {}", report.scanner, mask_detected_value(&report.rule, &f.secret))); }
                 let related = self.linked_groups.iter().find(|group| group.contains(&index)).cloned().unwrap_or_else(|| vec![index]);
                 ui.separator();
                 ui.label(RichText::new("RELATED FINDINGS").small().weak());
@@ -585,7 +617,7 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical().id_salt("related_findings").max_height(100.0).show(ui, |ui| {
                         for related_index in related.iter().copied() {
                             let item = &self.findings[related_index];
-                            let location = format!("{}:{} · {} · {}", if item.file.is_empty() { "Unknown file" } else { &item.file }, if item.line.is_empty() { "?" } else { &item.line }, if item.commit.is_empty() { "Unknown commit".to_owned() } else { item.commit.chars().take(10).collect() }, item.review.label());
+                            let location = format!("{}:{} · {} · {}", if item.file.is_empty() { "Unknown file".into() } else { mask_detected_value(&item.file, &item.secret) }, if item.line.is_empty() { "?" } else { &item.line }, if item.commit.is_empty() { "Unknown commit".to_owned() } else { item.commit.chars().take(10).collect() }, item.review.label());
                             if ui.add_enabled(!busy && related_index != index, egui::Button::new(location)).clicked() {
                                 select_related = Some(related_index);
                             }
@@ -597,9 +629,9 @@ impl eframe::App for App {
                     ui.label("Link or unlink another detected value");
                     let candidates: Vec<usize> = self.findings.iter().enumerate().filter(|(_, candidate)| !candidate.secret.is_empty() && candidate.secret != f.secret).map(|(i, _)| i).collect();
                     if self.link_candidate.is_some_and(|candidate| !candidates.contains(&candidate)) { self.link_candidate = None; }
-                    let candidate_label = self.link_candidate.map(|i| format!("{}:{} · {}", self.findings[i].file, self.findings[i].line, self.findings[i].rule)).unwrap_or_else(|| "Select another finding".into());
+                    let candidate_label = self.link_candidate.map(|i| format!("{}:{} · {}", mask_detected_value(&self.findings[i].file, &self.findings[i].secret), self.findings[i].line, mask_detected_value(&self.findings[i].rule, &self.findings[i].secret))).unwrap_or_else(|| "Select another finding".into());
                     ui.add_enabled_ui(!busy, |ui| { egui::ComboBox::from_id_salt("link_candidate").selected_text(candidate_label).show_ui(ui, |ui| {
-                        for &i in &candidates { let item = &self.findings[i]; ui.selectable_value(&mut self.link_candidate, Some(i), format!("{}:{} · {}", item.file, item.line, item.rule)); }
+                        for &i in &candidates { let item = &self.findings[i]; ui.selectable_value(&mut self.link_candidate, Some(i), format!("{}:{} · {}", mask_detected_value(&item.file, &item.secret), item.line, mask_detected_value(&item.rule, &item.secret))); }
                     }); });
                     ui.label(RichText::new("Links persist locally using the system credential store. Unlink removes the direct link; other links may still connect the values.").small().weak());
                     ui.horizontal(|ui| { for (label, linked) in [("Link values", true), ("Unlink values", false)] {
@@ -666,7 +698,7 @@ impl eframe::App for App {
                 ui.separator(); ui.label(RichText::new("PREPARE REDACTED HISTORY").small().weak()); ui.label("New mirror path"); ui.add_enabled(!busy, egui::TextEdit::singleline(&mut self.destination));
                 ui.label(RichText::new("Creates new branches in a separate mirror. Original refs in that mirror remain sensitive. No push is performed. Exact-value and scanner checks run after rewriting; review their coverage and results.").small().weak());
                 if ui.add_enabled(!busy && self.checked.iter().any(|x| *x) && !self.destination.is_empty(), egui::Button::new("Create redacted branches")).clicked() {
-                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let excluded_refs: Vec<String> = self.branches.iter().zip(&self.checked).filter(|(_, checked)| !**checked).map(|(branch, _)| branch.name.clone()).collect(); let has_unplaced_findings = self.findings.iter().any(|item| !f.secret.is_empty() && item.secret == f.secret && item.commit.is_empty()); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); let value = f.secret.clone(); self.prepared = None; self.verification_output = None; self.scanner_output = None; self.scanner_findings.clear(); self.scanner_used = None; self.completion_output = None; self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Rewrite((|| { let status = sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)?; let names: Vec<String> = (1..=refs.len()).map(|i| format!("refs/heads/sherlock/redacted-{i}")).collect(); let output_refs = sherlock_git::snapshot_refs(&d, &names).map_err(|e| format!("Rewrite finished in {}, but output refs could not be recorded: {e}", d.display()))?; Ok((PreparedRewrite { source: p, destination: d, source_refs: refs.iter().map(|entry| entry.name.clone()).collect(), excluded_refs, has_unplaced_findings, refs: output_refs, value }, status)) })()));
+                    let p = self.repo(); let d = PathBuf::from(&self.destination); let refs: Vec<sherlock_git::RefSnapshot> = self.branches.iter().zip(&self.checked).filter(|(_, c)| **c).map(|(b,_)| b.clone()).collect(); let excluded_refs: Vec<String> = self.branches.iter().zip(&self.checked).filter(|(_, checked)| !**checked).map(|(branch, _)| branch.name.clone()).collect(); let has_unplaced_findings = self.findings.iter().any(|item| !f.secret.is_empty() && item.secret == f.secret && item.commit.is_empty()); let occurrences: Vec<Finding> = self.findings.iter().filter(|item| !f.secret.is_empty() && item.secret == f.secret).cloned().collect(); let value = f.secret.clone(); self.prepared = None; self.verification_output = None; self.exact_locations.clear(); self.exact_location_error = None; self.scanner_output = None; self.scanner_findings.clear(); self.scanner_used = None; self.completion_output = None; self.status = "Preparing redacted branches…".into(); self.task(move || ResultMessage::Rewrite((|| { let status = sherlock_git::rewrite_related_at(&p, &d, &occurrences, &refs)?; let names: Vec<String> = (1..=refs.len()).map(|i| format!("refs/heads/sherlock/redacted-{i}")).collect(); let output_refs = sherlock_git::snapshot_refs(&d, &names).map_err(|e| format!("Rewrite finished in {}, but output refs could not be recorded: {e}", d.display()))?; Ok((PreparedRewrite { source: p, destination: d, source_refs: refs.iter().map(|entry| entry.name.clone()).collect(), excluded_refs, has_unplaced_findings, refs: output_refs, value }, status)) })()));
                 }
                 if let Some(prepared) = self.prepared.clone().filter(|prepared| prepared.source == self.repo() && prepared.value == f.secret) {
                     ui.separator();
@@ -678,10 +710,42 @@ impl eframe::App for App {
                     ui.label("Checks the exact detected value in file blobs at the recorded output tips, including binary files. Does not scan commit messages, LFS payloads, submodules, or other refs.");
                     if ui.add_enabled(!busy, egui::Button::new("Check exact value in rewritten branches")).clicked() {
                         let prepared = prepared.clone();
-                        self.status = "Checking rewritten history…".into(); self.verification_output = None;
+                        self.status = "Checking rewritten history…".into(); self.verification_output = None; self.exact_locations.clear(); self.exact_location_error = None;
                         self.task(move || ResultMessage::Verification(check_exact(&prepared)));
                     }
                     if let Some(result) = &self.verification_output { ui.separator(); ui.label(result); }
+                    if ui.add_enabled(!busy && self.verification_output.as_ref().is_some_and(|result| result.contains("found in ")), egui::Button::new("Locate exact matches in history")).clicked() {
+                        let prepared = prepared.clone(); self.exact_locations.clear(); self.exact_location_error = None;
+                        self.status = "Locating exact matches; large histories may take time…".into();
+                        self.task(move || ResultMessage::ExactLocations(sherlock_git::exact_history_locations(&prepared.destination, &prepared.refs, &[prepared.value.as_bytes()])));
+                    }
+                    if let Some(error) = &self.exact_location_error { ui.label(format!("Location search incomplete: {error}")); }
+                    if !self.exact_locations.is_empty() {
+                        ui.label("Exact matches in reachable file snapshots (not inferred moves):");
+                        for location in &self.exact_locations {
+                            let path = String::from_utf8_lossy(&location.path).replace(&prepared.value, "[MASKED]");
+                            let lines = location.matching_lines.as_ref().map(|lines| format!("lines {}", lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", "))).unwrap_or_else(|| "binary or non-UTF-8 content; line unavailable".into());
+                            ui.label(format!("{} · {} · {} · {}", location.commit, path, lines, location.containing_refs.join(", ")));
+                        }
+                        ui.label(RichText::new("Binary blobs are detectable but are not rewritten by Sherlock. Non-UTF-8 paths are displayed approximately.").small().weak());
+                        if ui.add_enabled(!busy, egui::Button::new("Review exact matches in the mirror →")).clicked() {
+                            let mut findings = Vec::new();
+                            for location in &self.exact_locations {
+                                let utf8_path = std::str::from_utf8(&location.path).ok();
+                                let file = utf8_path.unwrap_or("[non-UTF-8 path]").to_owned();
+                                let lines: Vec<String> = if utf8_path.is_some() { location.matching_lines.as_ref().map(|lines| lines.iter().map(usize::to_string).collect()).unwrap_or_else(|| vec![String::new()]) } else { vec![String::new()] };
+                                for line in lines { findings.push(Finding { scanner: "Exact-value check", rule: if location.matching_lines.is_none() { "Exact value in binary or non-UTF-8 blob".into() } else { "Exact value in file history".into() }, file: file.clone(), commit: location.commit.clone(), line, secret: prepared.value.clone(), evidence: vec![], review: Review::Unreviewed }); }
+                            }
+                            self.repo = prepared.destination.display().to_string();
+                            self.destination = sherlock_git::suggested_destination(&prepared.destination).display().to_string();
+                            self.findings = findings; self.linked_groups = group_by_secret(&self.findings); self.link_candidate = None;
+                            self.selected = None; self.branches.clear(); self.checked.clear(); self.history_output = None;
+                            self.scan_completed = true; self.page = Page::Discovery;
+                            self.status = "Reviewing exact matches in the mirror. Binary blobs are not rewritten and original refs remain sensitive.".into();
+                            let repo = self.link_repo.clone().unwrap_or_else(|| self.repo()); let values: Vec<String> = self.findings.iter().map(|finding| finding.secret.clone()).collect();
+                            self.task(move || ResultMessage::LinkGroups(sherlock_reviews::links::LinkStore::standard().and_then(|store| load_link_data(&store, &repo, &values))));
+                        }
+                    }
                     ui.separator();
                     ui.add_enabled_ui(!busy, |ui| {
                         egui::ComboBox::from_id_salt("verification_scanner")
@@ -801,10 +865,10 @@ impl eframe::App for App {
                         let f = &self.findings[i];
                         let text = format!(
                             "{}   ·   {} · {}\n{}:{}   ·   {}",
-                            f.rule,
+                            mask_detected_value(&f.rule, &f.secret),
                             f.review.label(),
                             f.scanner,
-                            f.file,
+                            mask_detected_value(&f.file, &f.secret),
                             f.line,
                             f.commit.chars().take(10).collect::<String>()
                         );
@@ -834,7 +898,7 @@ mod tests {
 
     #[test]
     fn finding_search_respects_classification_and_excludes_secret_values() {
-        let finding = Finding {
+        let mut finding = Finding {
             scanner: "Gitleaks",
             rule: "Example rule".into(),
             file: "config/settings.env".into(),
@@ -874,5 +938,16 @@ mod tests {
             "synthetic-secret-value"
         ));
         assert!(!finding_matches(&finding, ReviewFilter::All, "unmatched"));
+        finding.file = "config/synthetic-secret-value.env".into();
+        finding.evidence[0].rule = "synthetic-secret-value".into();
+        assert!(!finding_matches(
+            &finding,
+            ReviewFilter::All,
+            "synthetic-secret-value"
+        ));
+        assert_eq!(
+            mask_detected_value(&finding.file, &finding.secret),
+            "config/[MASKED].env"
+        );
     }
 }
