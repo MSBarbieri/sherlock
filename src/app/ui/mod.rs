@@ -1,5 +1,5 @@
 mod discovery;
 mod icons;
-mod resolution;
+pub(super) mod resolution;
 mod shell;
 mod welcome;

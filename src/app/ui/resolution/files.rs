@@ -75,6 +75,7 @@ impl App {
                                         self.file_preview = None;
                                         self.file_comparison = None;
                                         self.file_reveal = false;
+                                        self.diff_cache = None;
                                         self.status = "Loading historical file…".into();
                                         self.task(move || {
                                             ResultMessage::FilePreview(
@@ -104,6 +105,10 @@ impl App {
         let mut show_preview = false;
         if let Some((index, result)) = &self.file_preview {
             let finding = &self.findings[*index];
+            let showing_actual = self
+                .file_comparison
+                .as_ref()
+                .is_some_and(|(i, result)| i == index && result.is_ok());
             ui.horizontal_wrapped(|ui| {
                 language_icon(ui, &finding.file);
                 ui.label(RichText::new(mask_known_values(&finding.file, known_values)).strong());
@@ -132,16 +137,24 @@ impl App {
             ui.checkbox(&mut self.file_side_by_side, "Side-by-side diff");
             ui.horizontal_wrapped(|ui| {
                 ui.label(
-                    RichText::new("PROPOSED PREVIEW")
-                        .small()
-                        .strong()
-                        .color(Color32::from_rgb(132, 199, 190)),
+                    RichText::new(if showing_actual {
+                        "ACTUAL REWRITE"
+                    } else {
+                        "PROPOSED PREVIEW"
+                    })
+                    .small()
+                    .strong()
+                    .color(Color32::from_rgb(132, 199, 190)),
                 );
-                ui.label("Exact value · selected commit and file only");
-                ui.label(format!(
-                    "Replacement: {}",
-                    mask_known_values("[REDACTED]", known_values)
-                ));
+                if showing_actual {
+                    ui.label("Recorded corresponding branch tips");
+                } else {
+                    ui.label("Exact value · selected commit and file only");
+                    ui.label(format!(
+                        "Replacement: {}",
+                        mask_known_values("[REDACTED]", known_values)
+                    ));
+                }
             });
             if known_values
                 .iter()
@@ -196,14 +209,16 @@ impl App {
                                 .flatten()
                         })
                         .collect();
-                    ui.label(
-                        RichText::new(format!(
+                    if !showing_actual {
+                        ui.label(
+                            RichText::new(format!(
                             "{} exact replacement(s) · hover removed lines for scanner evidence",
                             preview.replacements
                         ))
-                        .small()
-                        .weak(),
-                    );
+                            .small()
+                            .weak(),
+                        );
+                    }
                     if !self.file_reveal
                         && known_values.iter().any(|value| {
                             value.contains(['\n', '\r'])
@@ -237,6 +252,7 @@ impl App {
                             } else {
                                 super::diff::render_diff(
                                     ui,
+                                    &mut self.diff_cache,
                                     "actual_diff",
                                     &finding.file,
                                     &comparison.original,
@@ -259,6 +275,7 @@ impl App {
                         }
                         super::diff::render_diff(
                             ui,
+                            &mut self.diff_cache,
                             "preview_diff",
                             &finding.file,
                             &preview.original,

@@ -52,6 +52,7 @@ pub struct App {
     file_comparison: Option<(usize, Result<sherlock_git::FileComparison, String>)>,
     file_reveal: bool,
     file_side_by_side: bool,
+    diff_cache: Option<ui::resolution::diff::DiffCache>,
     file_search: String,
     linked_groups: Vec<Vec<usize>>,
     saved_links: Vec<sherlock_reviews::links::LinkEdge>,
@@ -110,6 +111,7 @@ impl Default for App {
             file_comparison: None,
             file_reveal: false,
             file_side_by_side: false,
+            diff_cache: None,
             file_search: String::new(),
             linked_groups: Vec::new(),
             saved_links: Vec::new(),
@@ -179,6 +181,10 @@ impl eframe::App for App {
         self.poll_automatic_scan(ctx);
         if self.page != Page::Resolution {
             self.file_reveal = false;
+            self.inspection_open = false;
+            self.file_preview = None;
+            self.file_comparison = None;
+            self.diff_cache = None;
         }
         let busy = self.receiver.is_some();
         if self.project_root.is_none() {

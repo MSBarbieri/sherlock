@@ -1,4 +1,4 @@
-mod diff;
+pub(in crate::app) mod diff;
 mod files;
 mod redaction;
 mod related;
@@ -161,6 +161,7 @@ impl App {
             self.file_preview = None;
             self.file_comparison = None;
             self.file_reveal = false;
+            self.diff_cache = None;
             self.completion_output = None;
             self.selected = Some(index);
             self.inspection_open = false;
@@ -194,6 +195,7 @@ impl App {
                 if ui.button("← Finding details").clicked() {
                     self.inspection_open = false;
                     self.file_reveal = false;
+                    self.diff_cache = None;
                 }
                 ui.add_space(6.0);
                 egui::ScrollArea::vertical()

@@ -1,7 +1,10 @@
 use super::*;
 use egui::{text::LayoutJob, FontId, TextFormat};
 use similar::{ChangeTag, TextDiff};
-use std::sync::OnceLock;
+use std::{
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+};
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 
 struct DiffRow {
@@ -10,6 +13,11 @@ struct DiffRow {
     new: Option<usize>,
     code: LayoutJob,
     reported: bool,
+}
+
+pub(in crate::app) struct DiffCache {
+    key: u64,
+    rows: Vec<DiffRow>,
 }
 
 fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
@@ -59,6 +67,7 @@ fn highlighted_line(
 
 pub(super) fn render_diff(
     ui: &mut egui::Ui,
+    cache: &mut Option<DiffCache>,
     id: &str,
     path: &str,
     original: &str,
@@ -68,6 +77,97 @@ pub(super) fn render_diff(
     side_by_side: bool,
     reported_lines: &[usize],
 ) {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (path, original, rewritten, values, reveal, reported_lines).hash(&mut hasher);
+    let key = hasher.finish();
+    if cache.as_ref().is_none_or(|cached| cached.key != key) {
+        *cache = Some(DiffCache {
+            key,
+            rows: prepare_rows(path, original, rewritten, values, reveal, reported_lines),
+        });
+    }
+    let rows = &cache.as_ref().expect("diff cache populated").rows;
+    egui::ScrollArea::both()
+        .id_salt(id)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let mut cursor = 0;
+            while cursor < rows.len() {
+                if rows[cursor].tag != ChangeTag::Equal {
+                    if side_by_side {
+                        let start = cursor;
+                        while cursor < rows.len() && rows[cursor].tag != ChangeTag::Equal {
+                            cursor += 1;
+                        }
+                        let removed: Vec<_> = rows[start..cursor]
+                            .iter()
+                            .filter(|row| row.tag == ChangeTag::Delete)
+                            .collect();
+                        let added: Vec<_> = rows[start..cursor]
+                            .iter()
+                            .filter(|row| row.tag == ChangeTag::Insert)
+                            .collect();
+                        for i in 0..removed.len().max(added.len()) {
+                            ui.columns(2, |columns| {
+                                if let Some(row) = removed.get(i) {
+                                    render_cell(&mut columns[0], row, row.old);
+                                }
+                                if let Some(row) = added.get(i) {
+                                    render_cell(&mut columns[1], row, row.new);
+                                }
+                            });
+                        }
+                    } else {
+                        render_row(ui, &rows[cursor], false);
+                        cursor += 1;
+                    }
+                    continue;
+                }
+                let start = cursor;
+                while cursor < rows.len() && rows[cursor].tag == ChangeTag::Equal {
+                    cursor += 1;
+                }
+                let end = cursor;
+                let leading = if start == 0 { 0 } else { 3.min(end - start) };
+                let trailing = if end == rows.len() {
+                    0
+                } else {
+                    3.min(end - start - leading)
+                };
+                for row in &rows[start..start + leading] {
+                    render_row(ui, row, side_by_side);
+                }
+                let hidden = &rows[start + leading..end - trailing];
+                if !hidden.is_empty() {
+                    egui::CollapsingHeader::new(format!(
+                        "{} unchanged lines · expand",
+                        hidden.len()
+                    ))
+                    .id_salt((id, start))
+                    .show(ui, |ui| {
+                        for row in hidden {
+                            render_row(ui, row, side_by_side);
+                        }
+                    });
+                }
+                for row in &rows[end - trailing..end] {
+                    render_row(ui, row, side_by_side);
+                }
+            }
+            if rows.is_empty() {
+                ui.weak("This file is empty.");
+            }
+        });
+}
+
+fn prepare_rows(
+    path: &str,
+    original: &str,
+    rewritten: &str,
+    values: &[String],
+    reveal: bool,
+    reported_lines: &[usize],
+) -> Vec<DiffRow> {
     let (syntaxes, themes) = syntax_assets();
     let syntax = std::path::Path::new(path)
         .extension()
@@ -106,52 +206,7 @@ pub(super) fn render_diff(
             reported: old.is_some_and(|line| reported_lines.contains(&line)),
         });
     }
-    egui::ScrollArea::both()
-        .id_salt(id)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let mut cursor = 0;
-            while cursor < rows.len() {
-                if rows[cursor].tag != ChangeTag::Equal {
-                    render_row(ui, &rows[cursor], side_by_side);
-                    cursor += 1;
-                    continue;
-                }
-                let start = cursor;
-                while cursor < rows.len() && rows[cursor].tag == ChangeTag::Equal {
-                    cursor += 1;
-                }
-                let end = cursor;
-                let leading = if start == 0 { 0 } else { 3.min(end - start) };
-                let trailing = if end == rows.len() {
-                    0
-                } else {
-                    3.min(end - start - leading)
-                };
-                for row in &rows[start..start + leading] {
-                    render_row(ui, row, side_by_side);
-                }
-                let hidden = &rows[start + leading..end - trailing];
-                if !hidden.is_empty() {
-                    egui::CollapsingHeader::new(format!(
-                        "{} unchanged lines · expand",
-                        hidden.len()
-                    ))
-                    .id_salt((id, start))
-                    .show(ui, |ui| {
-                        for row in hidden {
-                            render_row(ui, row, side_by_side);
-                        }
-                    });
-                }
-                for row in &rows[end - trailing..end] {
-                    render_row(ui, row, side_by_side);
-                }
-            }
-            if rows.is_empty() {
-                ui.weak("This file is empty.");
-            }
-        });
+    rows
 }
 
 fn render_row(ui: &mut egui::Ui, row: &DiffRow, side_by_side: bool) {
