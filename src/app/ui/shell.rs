@@ -87,18 +87,20 @@ impl App {
             .show(ctx, |ui| {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
+                    super::icons::show(ui, super::icons::Icon::Scan);
                     if ui
-                        .selectable_label(self.page == Page::Discovery, "⌂\nScan")
+                        .selectable_label(self.page == Page::Discovery, "Scan")
                         .on_hover_text("Repository and scan")
                         .clicked()
                     {
                         self.page = Page::Discovery;
                     }
                     ui.add_space(8.0);
+                    super::icons::show(ui, super::icons::Icon::Finding);
                     if ui
                         .add_enabled(
                             self.selected.is_some(),
-                            egui::Button::new("◈\nReview").selected(self.page == Page::Resolution),
+                            egui::Button::new("Review").selected(self.page == Page::Resolution),
                         )
                         .on_hover_text("Secret workspace")
                         .clicked()

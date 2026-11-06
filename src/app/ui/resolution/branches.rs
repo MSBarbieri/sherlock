@@ -68,11 +68,10 @@ impl App {
             ui.label(mask_known_values(history, &known_values));
         }
         ui.add_space(8.0);
-        ui.label(
-            RichText::new("CONTAINING REFS FOR SELECTED VALUE")
-                .small()
-                .weak(),
-        );
+        ui.horizontal(|ui| {
+            crate::app::ui::icons::show(ui, crate::app::ui::icons::Icon::Branch);
+            ui.label(RichText::new("CONTAINING REFS FOR SELECTED VALUE").small().weak());
+        });
         egui::ScrollArea::vertical()
             .max_height(150.0)
             .show(ui, |ui| {

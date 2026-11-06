@@ -15,7 +15,7 @@ impl App {
                     ui.add_space(12.0);
                     ui.heading("Workspace");
                     ui.add_space(8.0);
-                    ui.label("Current repository");
+                    ui.horizontal(|ui| { super::icons::show(ui, super::icons::Icon::Repository); ui.label("Current repository"); });
                     ui.label(mask_known_values(&self.repo, known_values));
                     ui.separator();
                     ui.label("Scanner");
@@ -42,23 +42,19 @@ impl App {
                             });
                     });
                     if self.scanner != previous_scanner { self.request_scan(); }
-                    if ui
-                        .add_enabled(
-                            !busy && !self.repo.is_empty(),
-                            egui::Button::new("▶  Scan repository"),
-                        )
-                        .clicked()
+                    if ui.horizontal(|ui| {
+                        super::icons::show(ui, super::icons::Icon::Scan);
+                        ui.add_enabled(!busy && !self.repo.is_empty(), egui::Button::new("Scan repository")).clicked()
+                    }).inner
                     {
                         self.request_scan();
                     }
                     ui.label(RichText::new("Automatic scans cover committed Git history. Uncommitted files are not scanned.").small().weak());
                     ui.add_space(8.0);
-                    if ui
-                        .add_enabled(
-                            !busy && !self.repo.is_empty(),
-                            egui::Button::new("↻  Fetch all remotes"),
-                        )
-                        .clicked()
+                    if ui.horizontal(|ui| {
+                        super::icons::show(ui, super::icons::Icon::Refresh);
+                        ui.add_enabled(!busy && !self.repo.is_empty(), egui::Button::new("Fetch all remotes")).clicked()
+                    }).inner
                     {
                         let p = self.repo();
                         self.branches.clear();
@@ -108,6 +104,7 @@ impl App {
             egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
+                super::icons::show(ui, super::icons::Icon::Finding);
                 ui.heading("Secret workspaces");
                 ui.label(RichText::new(format!("{}", self.linked_groups.len())).weak());
             });

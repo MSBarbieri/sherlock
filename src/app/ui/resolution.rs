@@ -63,7 +63,9 @@ impl App {
             ui.add_space(12.0); ui.heading("Secret resolution"); ui.separator();
             egui::ScrollArea::vertical().id_salt("detail_content").show(ui, |ui| {
             if let Some(index) = self.selected { let f = self.findings[index].clone();
-                ui.label(RichText::new(mask_known_values(&f.rule, &known_values)).strong().color(Color32::from_rgb(197, 184, 255))); ui.label(format!("{} · line {}", mask_known_values(&f.file, &known_values), mask_known_values(&f.line, &known_values))); ui.label(format!("Commit  {}", mask_known_values(&f.commit, &known_values)));
+                ui.horizontal(|ui| { super::icons::show(ui, super::icons::Icon::Finding); ui.label(RichText::new(mask_known_values(&f.rule, &known_values)).strong().color(Color32::from_rgb(197, 184, 255))); });
+                ui.horizontal(|ui| { super::icons::show(ui, super::icons::Icon::File); ui.label(format!("{} · line {}", mask_known_values(&f.file, &known_values), mask_known_values(&f.line, &known_values))); });
+                ui.horizontal(|ui| { super::icons::show(ui, super::icons::Icon::Commit); ui.label(format!("Commit  {}", mask_known_values(&f.commit, &known_values))); });
                 ui.horizontal(|ui| {
                     if f.secret.is_empty() { ui.label("Secret value unavailable"); }
                     else {
