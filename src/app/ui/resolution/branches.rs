@@ -56,7 +56,12 @@ impl App {
                     );
                 }
                 Ok(view) => {
-                    ui.label("Original history · dots mark scanner-reported occurrences. Unmarked commits are not known to be clean; no moves or disappearances are inferred.");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("●").color(Color32::from_rgb(237, 180, 96)));
+                        ui.label(RichText::new("observed").small());
+                        ui.label(RichText::new("◇ merge   ○ commit").small().weak());
+                    });
+                    ui.label(RichText::new("Unmarked commits are not known to be clean. Moves and disappearances are not inferred.").small().weak());
                     if view.history.shallow {
                         ui.colored_label(Color32::YELLOW, "This repository has incomplete shallow history. Obtain complete history before preparing a rewrite.");
                     }
@@ -73,108 +78,18 @@ impl App {
                     {
                         expand_history = true;
                     }
-                    egui::ScrollArea::both()
-                        .id_salt("history_graph")
-                        .max_height(320.0)
-                        .show(ui, |ui| {
-                            let mut rows = view.lines.iter().peekable();
-                            while let Some(line) = rows.next() {
-                                let collapsible = |row: &sherlock_git::GraphLine| {
-                                    row.commit.as_ref().is_some_and(|id| {
-                                        row.drawing.chars().all(|c| c == '*' || c == ' ')
-                                            && !view
-                                                .history
-                                                .commits
-                                                .iter()
-                                                .any(|commit| commit.commit == *id)
-                                            && !view
-                                                .history
-                                                .refs
-                                                .iter()
-                                                .any(|reference| reference.tip == *id)
-                                    })
-                                };
-                                if collapsible(line) {
-                                    let mut stretch = vec![line];
-                                    while rows.peek().is_some_and(|row| collapsible(row)) {
-                                        stretch.push(rows.next().unwrap());
-                                    }
-                                    if stretch.len() > 1 {
-                                        ui.collapsing(
-                                            format!(
-                                                "│  ⋯ {} commits without known findings",
-                                                stretch.len()
-                                            ),
-                                            |ui| {
-                                                for row in &stretch {
-                                                    let id = row.commit.as_deref().unwrap_or("");
-                                                    ui.monospace(format!(
-                                                        "{}{} ○",
-                                                        row.drawing,
-                                                        mask_known_values(
-                                                            &id[..id.len().min(10)],
-                                                            known_values
-                                                        )
-                                                    ));
-                                                }
-                                            },
-                                        );
-                                        continue;
-                                    }
-                                }
-                                let Some(id) = &line.commit else {
-                                    ui.monospace(&line.drawing);
-                                    continue;
-                                };
-                                let occurrence =
-                                    view.history.commits.iter().find(|c| c.commit == *id);
-                                let mut labels = Vec::new();
-                                for snapshot in &view.history.refs {
-                                    if snapshot.tip == *id {
-                                        let selection = self
-                                            .branches
-                                            .iter()
-                                            .position(|b| b.name == snapshot.name)
-                                            .map(|i| {
-                                                if self.checked[i] {
-                                                    "selected"
-                                                } else {
-                                                    "excluded"
-                                                }
-                                            })
-                                            .unwrap_or("linked value");
-                                        labels.push(format!(
-                                            "{} ({selection})",
-                                            mask_known_values(&snapshot.name, known_values)
-                                        ));
-                                    }
-                                }
-                                let marker = if occurrence.is_some() {
-                                    "● observed"
-                                } else {
-                                    "○"
-                                };
-                                let title = format!(
-                                    "{}{} {}  {}",
-                                    line.drawing,
-                                    mask_known_values(&id[..id.len().min(10)], known_values),
-                                    marker,
-                                    labels.join(", ")
-                                );
-                                if let Some(commit) = occurrence {
-                                    if ui
-                                        .add(egui::Button::new(
-                                            egui::RichText::new(title).monospace(),
-                                        ))
-                                        .clicked()
-                                    {
-                                        self.history_selected_commit = Some(commit.commit.clone());
-                                    }
-                                } else {
-                                    ui.monospace(title);
-                                }
-                            }
-                        });
+                    if let Some(commit) = super::super::graph::show(
+                        ui,
+                        view,
+                        &self.branches,
+                        &self.checked,
+                        self.history_selected_commit.as_deref(),
+                        known_values,
+                        busy,
+                        "history_graph",
+                    ) {
+                        self.history_selected_commit = Some(commit);
+                    }
                     if let Some(commit) = self.history_selected_commit.as_ref().and_then(|id| {
                         view.history
                             .commits

@@ -52,28 +52,16 @@ impl App {
                         if graph.truncated {
                             ui.label("Older history is not shown (500-commit limit).");
                         }
-                        egui::ScrollArea::both()
-                            .id_salt("rewritten_history_graph")
-                            .max_height(260.0)
-                            .show(ui, |ui| {
-                                for line in &graph.lines {
-                                    let id = line.commit.as_deref().unwrap_or("");
-                                    let refs = graph
-                                        .history
-                                        .refs
-                                        .iter()
-                                        .filter(|r| r.tip == id)
-                                        .map(|r| mask_known_values(&r.name, known_values))
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    ui.monospace(format!(
-                                        "{}{}  {}",
-                                        line.drawing,
-                                        mask_known_values(&id[..id.len().min(10)], known_values),
-                                        refs
-                                    ));
-                                }
-                            });
+                        let _ = super::super::graph::show(
+                            ui,
+                            graph,
+                            &[],
+                            &[],
+                            None,
+                            known_values,
+                            busy,
+                            "rewritten_history_graph",
+                        );
                     }
                 }
             }

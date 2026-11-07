@@ -1,5 +1,6 @@
 pub(in crate::app) mod diff;
 mod files;
+mod graph;
 mod redaction;
 mod related;
 
@@ -189,7 +190,7 @@ impl App {
             .unwrap_or_else(|| vec![index]);
         egui::SidePanel::left("inspection_navigation")
             .resizable(true)
-            .default_width(340.0)
+            .default_width(400.0)
             .min_width(240.0)
             .show(ctx, |ui| {
                 if ui.button("← Finding details").clicked() {

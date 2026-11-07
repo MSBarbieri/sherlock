@@ -39,6 +39,8 @@ pub struct SecretHistory {
 pub struct GraphLine {
     pub drawing: String,
     pub commit: Option<String>,
+    pub parents: Vec<String>,
+    pub subject: String,
 }
 
 /// Draw the ancestry of the recorded ref tips and occurrence commits. The walk
@@ -65,7 +67,7 @@ pub fn history_graph_page(
     }
     let output = Command::new("git")
         .current_dir(repo)
-        .args(["log", "--graph", "--topo-order", "--format=%H"])
+        .args(["log", "--graph", "--topo-order", "--format=%H%x1f%P%x1f%s"])
         .arg(format!("--max-count={count_limit}"))
         .args(&starts)
         .output()
@@ -73,14 +75,18 @@ pub fn history_graph_page(
     if !output.status.success() {
         return Err("Could not draw commit history.".into());
     }
-    let text = String::from_utf8(output.stdout).map_err(|_| "Invalid Git graph output")?;
+    // Commit subjects can contain non-UTF-8 bytes; object IDs and graph cells are ASCII.
+    let text = String::from_utf8_lossy(&output.stdout);
     let mut count = 0;
     let mut lines = Vec::new();
     for line in text.lines() {
-        let commit = line
+        let (head, details) = line
+            .split_once('\x1f')
+            .map_or((line, None), |(head, details)| (head, Some(details)));
+        let commit = head
             .split_whitespace()
             .last()
-            .filter(|s| s.len() >= 40 && s.chars().all(|c| c.is_ascii_hexdigit()));
+            .filter(|s| matches!(s.len(), 40 | 64) && s.chars().all(|c| c.is_ascii_hexdigit()));
         if commit.is_some() {
             count += 1;
         }
@@ -88,12 +94,27 @@ pub fn history_graph_page(
             break;
         }
         let drawing = match commit {
-            Some(id) => line[..line.len() - id.len()].to_owned(),
+            Some(id) => head[..head.len() - id.len()].to_owned(),
             None => line.to_owned(),
+        };
+        let (parents, subject) = if commit.is_some() {
+            details.and_then(|text| text.split_once('\x1f')).map_or(
+                (Vec::new(), String::new()),
+                |(parents, subject)| {
+                    (
+                        parents.split_whitespace().map(str::to_owned).collect(),
+                        subject.to_owned(),
+                    )
+                },
+            )
+        } else {
+            (Vec::new(), String::new())
         };
         lines.push(GraphLine {
             drawing,
             commit: commit.map(str::to_owned),
+            parents,
+            subject,
         });
     }
     Ok((lines, count > limit))
