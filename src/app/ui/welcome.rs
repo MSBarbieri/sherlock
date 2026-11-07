@@ -5,7 +5,10 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(72.0);
             ui.vertical_centered(|ui| {
-                ui.add(egui::Image::new(self.logo(ctx, ui.visuals().dark_mode)).fit_to_exact_size(egui::vec2(96.0, 96.0)));
+                ui.add(
+                    egui::Image::new(self.logo(ctx, ui.visuals().dark_mode))
+                        .fit_to_exact_size(egui::vec2(96.0, 96.0)),
+                );
                 ui.add_space(8.0);
                 ui.heading(RichText::new("SHERLOCK").color(Color32::from_rgb(160, 143, 255)));
                 ui.add_space(20.0);

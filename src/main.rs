@@ -3,8 +3,9 @@ mod theme;
 use eframe::egui;
 
 fn main() -> eframe::Result {
-    let mut icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/sherlock-256.png"))
-        .expect("embedded Sherlock icon must be a valid PNG");
+    let mut icon =
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/sherlock-256.png"))
+            .expect("embedded Sherlock icon must be a valid PNG");
     // Composite the transparent mark over a rounded tile for the Dock and taskbar.
     let size = icon.width as f32;
     for (i, pixel) in icon.rgba.chunks_exact_mut(4).enumerate() {
@@ -21,7 +22,8 @@ fn main() -> eframe::Result {
         if alpha > 0.0 {
             for (channel, background) in pixel[..3].iter_mut().zip([239.0, 239.0, 237.0]) {
                 *channel = ((*channel as f32 * foreground_alpha
-                    + background * background_alpha * (1.0 - foreground_alpha)) / alpha)
+                    + background * background_alpha * (1.0 - foreground_alpha))
+                    / alpha)
                     .round() as u8;
             }
         }
