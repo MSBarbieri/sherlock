@@ -176,7 +176,39 @@ fn draw_row(
     } else {
         15.0
     };
-    let width = ui.available_width().max(lane_width + 190.0);
+    let subject = if row.subject.is_empty() {
+        "(no commit message)".to_owned()
+    } else {
+        mask_known_values(&row.subject, known_values)
+    };
+    let subject_width = ui
+        .painter()
+        .layout_no_wrap(
+            subject.clone(),
+            egui::FontId::proportional(13.0),
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    let badges_width: f32 = tip_refs
+        .iter()
+        .map(|reference| {
+            let short = reference
+                .name
+                .strip_prefix("refs/heads/")
+                .or_else(|| reference.name.strip_prefix("refs/remotes/"))
+                .unwrap_or(&reference.name);
+            let label = format!("{} · selected", mask_known_values(short, known_values));
+            ui.painter()
+                .layout_no_wrap(label, egui::FontId::proportional(10.5), Color32::WHITE)
+                .size()
+                .x
+                + 16.0
+        })
+        .sum();
+    let width = ui
+        .available_width()
+        .max(lane_width + subject_width.max(badges_width).max(190.0) + 12.0);
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(width, height),
         if occurrence.is_some() && !busy {
@@ -219,10 +251,22 @@ fn draw_row(
             '_' | '-' => {
                 segment((x - 4.0, center_y), (x + 4.0, center_y));
             }
+            '.' => {
+                segment((x - 4.0, center_y), (x, center_y));
+                segment((x, center_y), (x, rect.bottom()));
+            }
             '*' | 'o' => {
                 segment((x, rect.top()), (x, center_y));
                 if !row.parents.is_empty() {
                     segment((x, center_y), (x, rect.bottom()));
+                }
+                if row
+                    .drawing
+                    .chars()
+                    .nth(column + 1)
+                    .is_some_and(|next| matches!(next, '-' | '_' | '.'))
+                {
+                    segment((x, center_y), (x + 4.0, center_y));
                 }
                 let node = egui::pos2(x, center_y);
                 if occurrence.is_some() {
@@ -256,11 +300,6 @@ fn draw_row(
         let text_x = rect.left() + lane_width;
         let clip = egui::Rect::from_min_max(egui::pos2(text_x, rect.top()), rect.max);
         let painter = painter.with_clip_rect(clip);
-        let subject = if row.subject.is_empty() {
-            "(no commit message)".to_owned()
-        } else {
-            mask_known_values(&row.subject, known_values)
-        };
         painter.text(
             egui::pos2(text_x, rect.top() + 7.0),
             egui::Align2::LEFT_TOP,

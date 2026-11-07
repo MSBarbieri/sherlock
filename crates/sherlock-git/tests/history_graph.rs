@@ -77,3 +77,31 @@ fn graph_exposes_commit_subject_and_merge_parents() {
     assert_eq!(row.subject, "merge feature");
     assert_eq!(row.parents, vec![main, feature]);
 }
+
+#[test]
+fn graph_keeps_octopus_merge_connections_and_parents() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.name", "Test"]);
+    git(repo, &["config", "user.email", "test@example.com"]);
+    git(repo, &["commit", "--allow-empty", "-qm", "base"]);
+    for name in ["one", "two", "three"] {
+        git(repo, &["checkout", "-qb", name, "main"]);
+        git(repo, &["commit", "--allow-empty", "-qm", name]);
+    }
+    git(repo, &["checkout", "-q", "main"]);
+    git(
+        repo,
+        &["merge", "--no-ff", "-qm", "octopus", "one", "two", "three"],
+    );
+    let tip = git(repo, &["rev-parse", "HEAD"]);
+    let history = sherlock_git::secret_history(repo, &[], &["refs/heads/main".into()]).unwrap();
+    let (rows, _) = sherlock_git::history_graph(repo, &history).unwrap();
+    let merge = rows
+        .iter()
+        .find(|row| row.commit.as_deref() == Some(&tip))
+        .unwrap();
+    assert_eq!(merge.parents.len(), 4);
+    assert!(merge.drawing.contains('.'));
+}
